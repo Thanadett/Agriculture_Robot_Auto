@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -53,7 +54,7 @@ def generate_launch_description():
         executable='teleop_twist_keyboard',
         name='teleop_keyboard',
         output='screen',
-        condition=lambda context: use_teleop.perform(context) == 'true'
+        condition=IfCondition(use_teleop)
     )
 
     # ================= RViz (optional) =================
@@ -62,7 +63,7 @@ def generate_launch_description():
         executable='rviz2',
         name='rviz2',
         output='screen',
-        condition=lambda context: use_rviz.perform(context) == 'true'
+        condition=IfCondition(use_rviz)
     )
 
     return LaunchDescription([
