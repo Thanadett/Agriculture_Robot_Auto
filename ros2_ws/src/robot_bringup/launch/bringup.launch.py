@@ -9,7 +9,6 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('robot_bringup')
     ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
-    # ================= Robot Localization (EKF) =================
     ekf_node = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -18,15 +17,19 @@ def generate_launch_description():
         parameters=[ekf_config]
     )
 
-    # ================= Static TF: base_link -> imu_link =================
     static_tf_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_imu',
         arguments=[
-            '0', '0', '0',
-            '0', '0', '0',
-            'base_link', 'imu_link'
+            '--x', '0.0',
+            '--y', '0.0',
+            '--z', '0.0',
+            '--roll', '0.0',
+            '--pitch', '0.0',
+            '--yaw', '0.0',
+            '--frame-id', 'base_link',
+            '--child-frame-id', 'imu_link'
         ]
     )
 
