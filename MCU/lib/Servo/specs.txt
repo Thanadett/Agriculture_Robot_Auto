@@ -1,0 +1,22 @@
+specs
+both:
+    use PWM 50 Hz
+
+TD-8120MG (360):
+    Pulse width range   ( 500～2500usec)
+    Neutral position    (1500usec)
+    Running degree 180°±3°  ( 500～2500usec)
+    Dead band width (3 usec)
+    pulse width range   ( 500~2500 usec)
+    Neutral position    ( 1500 usec)
+    Rotating direction Counterclockwise ( 1000～2000usec)
+
+MG996R (180):
+    Pulse width range   ( 500～2500usec)
+
+
+Xbox mapping:
+    A = 0
+    B = 1
+    X = 2
+    

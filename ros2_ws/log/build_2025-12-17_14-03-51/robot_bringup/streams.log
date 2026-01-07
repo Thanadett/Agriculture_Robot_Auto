@@ -1,0 +1,24 @@
+[0.452s] Invoking command in '/home/t/392_project/ros2_ws/src/robot_bringup': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/t/392_project/ros2_ws/build/robot_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/robot_bringup build --build-base /home/t/392_project/ros2_ws/build/robot_bringup/build install --record /home/t/392_project/ros2_ws/build/robot_bringup/install.log --single-version-externally-managed install_data
+[0.604s] running egg_info
+[0.615s] writing ../../build/robot_bringup/robot_bringup.egg-info/PKG-INFO
+[0.615s] writing dependency_links to ../../build/robot_bringup/robot_bringup.egg-info/dependency_links.txt
+[0.615s] writing requirements to ../../build/robot_bringup/robot_bringup.egg-info/requires.txt
+[0.615s] writing top-level names to ../../build/robot_bringup/robot_bringup.egg-info/top_level.txt
+[0.636s] reading manifest file '../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[0.636s] adding license file 'LICENSE'
+[0.636s] writing manifest file '../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[0.636s] running build
+[0.636s] running build_py
+[0.636s] running install
+[0.640s] running install_lib
+[0.651s] running install_data
+[0.651s] copying package.xml -> /home/t/392_project/ros2_ws/install/robot_bringup/share/robot_bringup
+[0.651s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/robot_bringup/launch
+[0.651s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/robot_bringup/config
+[0.651s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/robot_bringup/urdf
+[0.651s] running install_egg_info
+[0.662s] removing '/home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup-0.0.0-py3.12.egg-info' (and everything under it)
+[0.662s] Copying ../../build/robot_bringup/robot_bringup.egg-info to /home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup-0.0.0-py3.12.egg-info
+[0.662s] running install_scripts
+[0.733s] writing list of installed files to '/home/t/392_project/ros2_ws/build/robot_bringup/install.log'
+[0.749s] Invoked command in '/home/t/392_project/ros2_ws/src/robot_bringup' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/t/392_project/ros2_ws/build/robot_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/robot_bringup build --build-base /home/t/392_project/ros2_ws/build/robot_bringup/build install --record /home/t/392_project/ros2_ws/build/robot_bringup/install.log --single-version-externally-managed install_data

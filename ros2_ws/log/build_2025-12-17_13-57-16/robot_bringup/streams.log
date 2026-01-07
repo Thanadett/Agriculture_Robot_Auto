@@ -1,0 +1,33 @@
+[0.440s] Invoking command in '/home/t/392_project/ros2_ws/src/robot_bringup': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/t/392_project/ros2_ws/build/robot_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/robot_bringup build --build-base /home/t/392_project/ros2_ws/build/robot_bringup/build install --record /home/t/392_project/ros2_ws/build/robot_bringup/install.log --single-version-externally-managed install_data
+[0.596s] running egg_info
+[0.596s] creating ../../build/robot_bringup/robot_bringup.egg-info
+[0.607s] writing ../../build/robot_bringup/robot_bringup.egg-info/PKG-INFO
+[0.608s] writing dependency_links to ../../build/robot_bringup/robot_bringup.egg-info/dependency_links.txt
+[0.608s] writing requirements to ../../build/robot_bringup/robot_bringup.egg-info/requires.txt
+[0.608s] writing top-level names to ../../build/robot_bringup/robot_bringup.egg-info/top_level.txt
+[0.608s] writing manifest file '../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[0.631s] reading manifest file '../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[0.631s] adding license file 'LICENSE'
+[0.631s] writing manifest file '../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[0.631s] running build
+[0.631s] running build_py
+[0.631s] creating /home/t/392_project/ros2_ws/build/robot_bringup/build
+[0.631s] creating /home/t/392_project/ros2_ws/build/robot_bringup/build/lib
+[0.631s] creating /home/t/392_project/ros2_ws/build/robot_bringup/build/lib/robot_bringup
+[0.631s] copying robot_bringup/__init__.py -> /home/t/392_project/ros2_ws/build/robot_bringup/build/lib/robot_bringup
+[0.631s] running install
+[0.635s] running install_lib
+[0.647s] creating /home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+[0.647s] copying /home/t/392_project/ros2_ws/build/robot_bringup/build/lib/robot_bringup/__init__.py -> /home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+[0.647s] byte-compiling /home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup/__init__.py to __init__.cpython-312.pyc
+[0.647s] running install_data
+[0.647s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/ament_index
+[0.647s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/ament_index/resource_index
+[0.647s] creating /home/t/392_project/ros2_ws/install/robot_bringup/share/ament_index/resource_index/packages
+[0.648s] copying resource/robot_bringup -> /home/t/392_project/ros2_ws/install/robot_bringup/share/ament_index/resource_index/packages
+[0.648s] copying package.xml -> /home/t/392_project/ros2_ws/install/robot_bringup/share/robot_bringup
+[0.648s] running install_egg_info
+[0.669s] Copying ../../build/robot_bringup/robot_bringup.egg-info to /home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages/robot_bringup-0.0.0-py3.12.egg-info
+[0.669s] running install_scripts
+[0.755s] writing list of installed files to '/home/t/392_project/ros2_ws/build/robot_bringup/install.log'
+[0.775s] Invoked command in '/home/t/392_project/ros2_ws/src/robot_bringup' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/t/392_project/ros2_ws/build/robot_bringup/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/t/392_project/ros2_ws/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/robot_bringup build --build-base /home/t/392_project/ros2_ws/build/robot_bringup/build install --record /home/t/392_project/ros2_ws/build/robot_bringup/install.log --single-version-externally-managed install_data
