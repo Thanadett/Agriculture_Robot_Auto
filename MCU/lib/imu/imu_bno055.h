@@ -21,5 +21,5 @@ public:
     float ax = 0, ay = 0, az = 0;
 
 private:
-    Adafruit_BNO055 bno_{55};
+    Adafruit_BNO055 bno_{55, 0x29};
 };

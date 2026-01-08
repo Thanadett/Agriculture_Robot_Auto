@@ -1,0 +1,40 @@
+[0.902s] Invoking command in '/home/prukubt/392_Agri/ros2_ws/src/robot_bringup': PYTHONPATH=/home/prukubt/392_Agri/build/robot_bringup/prefix_override:/home/prukubt/.platformio/penv/lib/python3.12/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /home/prukubt/.platformio/penv/bin/python -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../../build/robot_bringup build --build-base /home/prukubt/392_Agri/build/robot_bringup/build install --record /home/prukubt/392_Agri/build/robot_bringup/install.log --single-version-externally-managed install_data
+[1.210s] running egg_info
+[1.227s] creating ../../../build/robot_bringup/robot_bringup.egg-info
+[1.227s] writing ../../../build/robot_bringup/robot_bringup.egg-info/PKG-INFO
+[1.227s] writing dependency_links to ../../../build/robot_bringup/robot_bringup.egg-info/dependency_links.txt
+[1.228s] writing entry points to ../../../build/robot_bringup/robot_bringup.egg-info/entry_points.txt
+[1.228s] writing requirements to ../../../build/robot_bringup/robot_bringup.egg-info/requires.txt
+[1.228s] writing top-level names to ../../../build/robot_bringup/robot_bringup.egg-info/top_level.txt
+[1.228s] writing manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[1.264s] reading manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[1.264s] adding license file 'LICENSE'
+[1.265s] writing manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+[1.265s] running build
+[1.265s] running build_py
+[1.265s] creating /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+[1.266s] copying robot_bringup/wheel_odometry_node.py -> /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+[1.266s] copying robot_bringup/__init__.py -> /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+[1.266s] running install
+[1.274s] running install_lib
+[1.291s] creating /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+[1.291s] copying /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup/wheel_odometry_node.py -> /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+[1.291s] copying /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup/__init__.py -> /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+[1.292s] byte-compiling /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup/wheel_odometry_node.py to wheel_odometry_node.cpython-312.pyc
+[1.293s] byte-compiling /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup/__init__.py to __init__.cpython-312.pyc
+[1.293s] running install_data
+[1.294s] creating /home/prukubt/392_Agri/install/robot_bringup/share/ament_index/resource_index/packages
+[1.294s] copying resource/robot_bringup -> /home/prukubt/392_Agri/install/robot_bringup/share/ament_index/resource_index/packages
+[1.294s] copying package.xml -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup
+[1.294s] creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+[1.294s] copying launch/micro_ros.launch.py -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+[1.295s] copying launch/bringup.launch.py -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+[1.295s] creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/config
+[1.295s] copying config/ekf.yaml -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/config
+[1.295s] creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/urdf
+[1.295s] running install_egg_info
+[1.313s] Copying ../../../build/robot_bringup/robot_bringup.egg-info to /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup-0.0.0-py3.12.egg-info
+[1.314s] running install_scripts
+[1.408s] Installing wheel_odometry_node script to /home/prukubt/392_Agri/install/robot_bringup/lib/robot_bringup
+[1.409s] writing list of installed files to '/home/prukubt/392_Agri/build/robot_bringup/install.log'
+[1.477s] Invoked command in '/home/prukubt/392_Agri/ros2_ws/src/robot_bringup' returned '0': PYTHONPATH=/home/prukubt/392_Agri/build/robot_bringup/prefix_override:/home/prukubt/.platformio/penv/lib/python3.12/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages:${PYTHONPATH} /home/prukubt/.platformio/penv/bin/python -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../../build/robot_bringup build --build-base /home/prukubt/392_Agri/build/robot_bringup/build install --record /home/prukubt/392_Agri/build/robot_bringup/install.log --single-version-externally-managed install_data

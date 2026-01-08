@@ -1,0 +1,38 @@
+running egg_info
+creating ../../../build/robot_bringup/robot_bringup.egg-info
+writing ../../../build/robot_bringup/robot_bringup.egg-info/PKG-INFO
+writing dependency_links to ../../../build/robot_bringup/robot_bringup.egg-info/dependency_links.txt
+writing entry points to ../../../build/robot_bringup/robot_bringup.egg-info/entry_points.txt
+writing requirements to ../../../build/robot_bringup/robot_bringup.egg-info/requires.txt
+writing top-level names to ../../../build/robot_bringup/robot_bringup.egg-info/top_level.txt
+writing manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+reading manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file '../../../build/robot_bringup/robot_bringup.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+copying robot_bringup/wheel_odometry_node.py -> /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+copying robot_bringup/__init__.py -> /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup
+running install
+running install_lib
+creating /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+copying /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup/wheel_odometry_node.py -> /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+copying /home/prukubt/392_Agri/build/robot_bringup/build/lib/robot_bringup/__init__.py -> /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup
+byte-compiling /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup/wheel_odometry_node.py to wheel_odometry_node.cpython-312.pyc
+byte-compiling /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup/__init__.py to __init__.cpython-312.pyc
+running install_data
+creating /home/prukubt/392_Agri/install/robot_bringup/share/ament_index/resource_index/packages
+copying resource/robot_bringup -> /home/prukubt/392_Agri/install/robot_bringup/share/ament_index/resource_index/packages
+copying package.xml -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup
+creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+copying launch/micro_ros.launch.py -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+copying launch/bringup.launch.py -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/launch
+creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/config
+copying config/ekf.yaml -> /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/config
+creating /home/prukubt/392_Agri/install/robot_bringup/share/robot_bringup/urdf
+running install_egg_info
+Copying ../../../build/robot_bringup/robot_bringup.egg-info to /home/prukubt/392_Agri/install/robot_bringup/lib/python3.12/site-packages/robot_bringup-0.0.0-py3.12.egg-info
+running install_scripts
+Installing wheel_odometry_node script to /home/prukubt/392_Agri/install/robot_bringup/lib/robot_bringup
+writing list of installed files to '/home/prukubt/392_Agri/build/robot_bringup/install.log'

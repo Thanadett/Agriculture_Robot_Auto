@@ -36,6 +36,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'wheel_odometry_node = robot_bringup.wheel_odometry_node:main',
         ],
     },
 )
