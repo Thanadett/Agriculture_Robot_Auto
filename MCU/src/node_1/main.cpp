@@ -36,7 +36,7 @@
 
 #define TOPIC_WHEEL_TICKS "wheel_ticks"
 #define TOPIC_HEARTBEAT "robot_heartbeat"
-#define TOPIC_CMD_VEL "cmd_vel"
+#define TOPIC_CMD_VEL "cmd_vel_pid"
 #define TOPIC_IMU_DATA "imu/data"
 #define TOPIC_PID_DEBUG "pid_debug"
 #define TOPIC_JOY_RESET "joy_reset"

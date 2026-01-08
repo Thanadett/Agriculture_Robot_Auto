@@ -9,6 +9,23 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('robot_bringup')
     ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
+    # ================= Heading PID (Yaw Control) =================
+    heading_pid_node = Node(
+        package='robot_bringup',
+        executable='heading_pid_node',
+        name='heading_pid',
+        output='screen',
+        parameters=[
+            {
+                'kp': 1.0,
+                'ki': 0.0,
+                'kd': 0.05,
+                'max_angular': 0.5,
+                'enable_threshold': 0.05
+            }
+        ]
+    )
+
     # ================= EKF =================
     ekf_node = Node(
         package='robot_localization',
@@ -40,6 +57,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        heading_pid_node,
         ekf_node,
         static_tf_imu,
         wheel_odometry_node,

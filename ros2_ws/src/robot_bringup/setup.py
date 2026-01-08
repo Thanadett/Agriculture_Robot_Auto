@@ -37,6 +37,7 @@ setup(
     entry_points={
         'console_scripts': [
             'wheel_odometry_node = robot_bringup.wheel_odometry_node:main',
+            'heading_pid_node = robot_bringup.heading_pid_node:main',
         ],
     },
 )
