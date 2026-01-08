@@ -44,8 +44,8 @@
 // ===== PID Tuning Parameters =====
 #define YAW_RATE_DEADZONE 0.015f
 #define PID_KP 0.8f
-#define PID_KI 0.0f
-#define PID_KD 0.0f
+#define PID_KI 0.04f
+#define PID_KD 0.002f
 #define PID_I_CLAMP_MIN -0.05f
 #define PID_I_CLAMP_MAX 0.05f
 #define PID_OUT_MIN -3.0f
