@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 import math
-
 import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import Float32MultiArray
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Quaternion, TransformStamped
+from tf2_ros import TransformBroadcaster
 
 
 class WheelOdometryNode(Node):
@@ -14,7 +14,6 @@ class WheelOdometryNode(Node):
     def __init__(self):
         super().__init__('wheel_odometry_node')
 
-        # ================= Parameters =================
         self.declare_parameter('wheel_separation', 0.365)
         self.declare_parameter('frame_id', 'odom')
         self.declare_parameter('child_frame_id', 'base_link')
@@ -23,11 +22,6 @@ class WheelOdometryNode(Node):
         self.frame_id = self.get_parameter('frame_id').value
         self.child_frame_id = self.get_parameter('child_frame_id').value
 
-        if self.wheel_sep <= 0.0:
-            self.get_logger().fatal('wheel_separation must be > 0')
-            raise RuntimeError('Invalid wheel_separation')
-
-        # ================= State =================
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
@@ -35,7 +29,6 @@ class WheelOdometryNode(Node):
         self.prev_left = None
         self.prev_right = None
 
-        # ================= ROS I/O =================
         self.sub_ticks = self.create_subscription(
             Float32MultiArray,
             '/wheel_ticks',
@@ -49,41 +42,30 @@ class WheelOdometryNode(Node):
             10
         )
 
-        self.get_logger().info('wheel_odometry_node started (pure python)')
+        self.tf_broadcaster = TransformBroadcaster(self)
 
-    # ================= Utilities =================
+        self.get_logger().info('wheel_odometry_node started (NO EKF, TF ENABLED)')
+
     @staticmethod
-    def normalize_angle(a: float) -> float:
+    def normalize_angle(a):
         return math.atan2(math.sin(a), math.cos(a))
 
     @staticmethod
-    def yaw_to_quaternion(yaw: float) -> Quaternion:
-        """
-        Planar robot quaternion (roll = pitch = 0)
-        """
-        half = 0.5 * yaw
-        return Quaternion(
-            x=0.0,
-            y=0.0,
-            z=math.sin(half),
-            w=math.cos(half),
-        )
+    def yaw_to_quaternion(yaw):
+        h = 0.5 * yaw
+        return Quaternion(x=0.0, y=0.0, z=math.sin(h), w=math.cos(h))
 
-    # ================= Callback =================
     def on_ticks(self, msg: Float32MultiArray):
-
-        # Expect: [fl, fr, rl, rr]
         if len(msg.data) < 4:
-            self.get_logger().warn('wheel_ticks size < 4')
             return
 
-        # convert cm -> m (ตามที่คุณใช้)
-        fl, fr, rl, rr = [float(v) * 0.01 for v in msg.data]
+        fl, fr, rl, rr = [v * 0.01 for v in msg.data]
+        if not all(math.isfinite(v) for v in [fl, fr, rl, rr]):
+            return
 
         left = 0.5 * (fl + rl)
         right = 0.5 * (fr + rr)
 
-        # First callback → init only
         if self.prev_left is None:
             self.prev_left = left
             self.prev_right = right
@@ -94,7 +76,6 @@ class WheelOdometryNode(Node):
         self.prev_left = left
         self.prev_right = right
 
-        # ================= Odometry =================
         ds = 0.5 * (d_left + d_right)
         dtheta = (d_right - d_left) / self.wheel_sep
 
@@ -102,25 +83,35 @@ class WheelOdometryNode(Node):
         self.x += ds * math.cos(self.yaw)
         self.y += ds * math.sin(self.yaw)
 
-        # ================= Publish Odom =================
+        q = self.yaw_to_quaternion(self.yaw)
+
+        now = self.get_clock().now().to_msg()
+
+        # ---------- Odometry ----------
         odom = Odometry()
-        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.stamp = now
         odom.header.frame_id = self.frame_id
         odom.child_frame_id = self.child_frame_id
 
-        odom.pose.pose.position.x = float(self.x)
-        odom.pose.pose.position.y = float(self.y)
+        odom.pose.pose.position.x = self.x
+        odom.pose.pose.position.y = self.y
         odom.pose.pose.position.z = 0.0
-
-        odom.pose.pose.orientation = self.yaw_to_quaternion(self.yaw)
-
-        # ================= Covariance (EKF-friendly) =================
-        odom.pose.covariance = [0.0] * 36
-        odom.pose.covariance[0] = 0.05     # x
-        odom.pose.covariance[7] = 0.05     # y
-        odom.pose.covariance[35] = 0.2     # yaw
+        odom.pose.pose.orientation = q
 
         self.pub_odom.publish(odom)
+
+        # ---------- TF odom -> base_link ----------
+        tf = TransformStamped()
+        tf.header.stamp = now
+        tf.header.frame_id = self.frame_id
+        tf.child_frame_id = self.child_frame_id
+
+        tf.transform.translation.x = self.x
+        tf.transform.translation.y = self.y
+        tf.transform.translation.z = 0.0
+        tf.transform.rotation = q
+
+        self.tf_broadcaster.sendTransform(tf)
 
 
 def main():

@@ -34,11 +34,11 @@ class HeadingPID(Node):
         super().__init__('heading_pid')
 
         # ===== Parameters =====
-        self.declare_parameter('kp', 1.0)
+        self.declare_parameter('kp', 2.7)
         self.declare_parameter('ki', 0.0)
-        self.declare_parameter('kd', 0.05)
+        self.declare_parameter('kd', 0.02)
         self.declare_parameter('max_angular', 0.5)
-        self.declare_parameter('enable_threshold', 0.05)
+        self.declare_parameter('enable_threshold', 0.03)
 
         self.kp = self.get_parameter('kp').value
         self.ki = self.get_parameter('ki').value
