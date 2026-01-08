@@ -7,7 +7,6 @@ from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion
-from scipy.spatial.transform import Rotation as R
 
 
 class WheelOdometryNode(Node):
@@ -50,7 +49,7 @@ class WheelOdometryNode(Node):
             10
         )
 
-        self.get_logger().info('wheel_odometry_node started')
+        self.get_logger().info('wheel_odometry_node started (pure python)')
 
     # ================= Utilities =================
     @staticmethod
@@ -59,12 +58,15 @@ class WheelOdometryNode(Node):
 
     @staticmethod
     def yaw_to_quaternion(yaw: float) -> Quaternion:
-        q = R.from_euler('z', yaw).as_quat()  # [x, y, z, w]
+        """
+        Planar robot quaternion (roll = pitch = 0)
+        """
+        half = 0.5 * yaw
         return Quaternion(
-            x=float(q[0]),
-            y=float(q[1]),
-            z=float(q[2]),
-            w=float(q[3]),
+            x=0.0,
+            y=0.0,
+            z=math.sin(half),
+            w=math.cos(half),
         )
 
     # ================= Callback =================
@@ -75,13 +77,13 @@ class WheelOdometryNode(Node):
             self.get_logger().warn('wheel_ticks size < 4')
             return
 
-        # convert cm -> m (ตามโค้ดเดิมคุณ)
+        # convert cm -> m (ตามที่คุณใช้)
         fl, fr, rl, rr = [float(v) * 0.01 for v in msg.data]
 
         left = 0.5 * (fl + rl)
         right = 0.5 * (fr + rr)
 
-        # First message → just init
+        # First callback → init only
         if self.prev_left is None:
             self.prev_left = left
             self.prev_right = right
@@ -112,8 +114,7 @@ class WheelOdometryNode(Node):
 
         odom.pose.pose.orientation = self.yaw_to_quaternion(self.yaw)
 
-        # ================= Covariance =================
-        # EKF-friendly (ไม่เล็กเกิน ไม่ใหญ่เกิน)
+        # ================= Covariance (EKF-friendly) =================
         odom.pose.covariance = [0.0] * 36
         odom.pose.covariance[0] = 0.05     # x
         odom.pose.covariance[7] = 0.05     # y

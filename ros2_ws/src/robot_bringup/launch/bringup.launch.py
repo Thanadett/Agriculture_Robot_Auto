@@ -19,7 +19,7 @@ def generate_launch_description():
             {
                 'kp': 1.0,
                 'ki': 0.0,
-                'kd': 0.05,
+                'kd': 0.0,
                 'max_angular': 0.5,
                 'enable_threshold': 0.05
             }
