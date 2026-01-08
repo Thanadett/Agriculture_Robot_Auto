@@ -327,6 +327,14 @@ static void fast_loop_200hz()
 #endif
 }
 
+static inline bool quat_valid(float x, float y, float z, float w)
+{
+    if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(w))
+        return false;
+    float n = x * x + y * y + z * z + w * w;
+    return (n > 1e-6f);
+}
+
 // ============================ IMU Publishing (100Hz) ============================
 static void publish_imu_100hz()
 {
@@ -351,11 +359,27 @@ static void publish_imu_100hz()
     msg_imu.header.frame_id.size = strlen(frame);
     msg_imu.header.frame_id.capacity = msg_imu.header.frame_id.size + 1;
 
-    // Orientation (quaternion)
-    msg_imu.orientation.x = g_imu.qx;
-    msg_imu.orientation.y = g_imu.qy;
-    msg_imu.orientation.z = g_imu.qz;
-    msg_imu.orientation.w = g_imu.qw;
+    float qx = g_imu.qx;
+    float qy = g_imu.qy;
+    float qz = g_imu.qz;
+    float qw = g_imu.qw;
+
+    if (!quat_valid(qx, qy, qz, qw))
+    {
+        return;
+    }
+
+    // normalize (กัน drift)
+    float invn = 1.0f / sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+    qx *= invn;
+    qy *= invn;
+    qz *= invn;
+    qw *= invn;
+
+    msg_imu.orientation.x = qx;
+    msg_imu.orientation.y = qy;
+    msg_imu.orientation.z = qz;
+    msg_imu.orientation.w = qw;
 
     // Angular velocity (rad/s)
     msg_imu.angular_velocity.x = g_imu.wx;
@@ -371,9 +395,9 @@ static void publish_imu_100hz()
     // Orientation covariance
     for (int i = 0; i < 9; i++)
         msg_imu.orientation_covariance[i] = 0.0;
-    msg_imu.orientation_covariance[0] = 0.0001; // x
-    msg_imu.orientation_covariance[4] = 0.0001; // y
-    msg_imu.orientation_covariance[8] = 0.0001; // z
+    msg_imu.orientation_covariance[0] = 99999.0; // roll
+    msg_imu.orientation_covariance[4] = 99999.0; // pitch
+    msg_imu.orientation_covariance[8] = 0.2;     // yaw
 
     // Angular velocity covariance
     for (int i = 0; i < 9; i++)
