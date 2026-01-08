@@ -225,22 +225,60 @@ static void on_cmd_vel(const void *msgin)
     last_cmd_ms = millis();
 }
 
+static inline bool finite4(float a, float b, float c, float d)
+{
+    return isfinite(a) && isfinite(b) && isfinite(c) && isfinite(d);
+}
+
+static bool enc_ready = false;
+static float last_fl = 0, last_fr = 0, last_rl = 0, last_rr = 0;
+
 static void on_timer(rcl_timer_t * /*timer*/, int64_t /*last_call_time*/)
 {
     enc.update();
     motorDrive_update();
 
-    // Publish wheel ticks
+    if (!enc_ready)
+    {
+        enc_ready = true;
+        return;
+    }
+
     if (msg_ticks.data.size >= 4)
     {
-        msg_ticks.data.data[0] = m_to_cm_2f(enc.totalDistanceM(W_FL));
-        msg_ticks.data.data[1] = m_to_cm_2f(enc.totalDistanceM(W_FR));
-        msg_ticks.data.data[2] = m_to_cm_2f(enc.totalDistanceM(W_RL));
-        msg_ticks.data.data[3] = m_to_cm_2f(enc.totalDistanceM(W_RR));
+        float fl = enc.totalDistanceM(W_FL);
+        float fr = enc.totalDistanceM(W_FR);
+        float rl = enc.totalDistanceM(W_RL);
+        float rr = enc.totalDistanceM(W_RR);
+
+        if (!finite4(fl, fr, rl, rr))
+        {
+            return;
+        }
+
+        if (fl < last_fl || fr < last_fr || rl < last_rl || rr < last_rr)
+        {
+            last_fl = fl;
+            last_fr = fr;
+            last_rl = rl;
+            last_rr = rr;
+            return;
+        }
+
+        last_fl = fl;
+        last_fr = fr;
+        last_rl = rl;
+        last_rr = rr;
+
+        msg_ticks.data.data[0] = m_to_cm_2f(fl);
+        msg_ticks.data.data[1] = m_to_cm_2f(fr);
+        msg_ticks.data.data[2] = m_to_cm_2f(rl);
+        msg_ticks.data.data[3] = m_to_cm_2f(rr);
+
         RCSOFTCHECK(rcl_publish(&pub_ticks, &msg_ticks, NULL));
     }
 
-    // Publish heartbeat
+    // heartbeat (เหมือนเดิม)
     static uint32_t hb_ts = 0;
     uint32_t now = millis();
     if (now - hb_ts >= 200U)
