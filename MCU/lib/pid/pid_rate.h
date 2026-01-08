@@ -43,6 +43,16 @@ public:
 
     float step(float set_w, float meas_w, float dt)
     {
+        // ===== ADD THIS BLOCK =====
+        if (fabs(set_w) < 0.001f)
+        {
+            i_ = 0.0f;
+            d_filt_ = 0.0f;
+            prev_meas_ = meas_w;
+            return 0.0f;
+        }
+        // =========================
+
         // error
         float e = set_w - meas_w;
 
@@ -55,15 +65,17 @@ public:
 
         // derivative on measurement with LPF
         float raw_d = (meas_w - prev_meas_) / (dt > 1e-6f ? dt : 1e-6f);
-        float alpha = dt / ((1.0f / (2.0f * PI * d_fc_)) + dt); // 2πfc
+        float alpha = dt / ((1.0f / (2.0f * PI * d_fc_)) + dt);
         d_filt_ += alpha * (raw_d - d_filt_);
         prev_meas_ = meas_w;
 
         float u = kp_ * e + i_ - kd_ * d_filt_;
+
         if (u > out_max_)
             u = out_max_;
         if (u < out_min_)
             u = out_min_;
+
         return u;
     }
 
