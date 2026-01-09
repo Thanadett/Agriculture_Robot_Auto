@@ -1,12 +1,13 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
-# import os
+import os
 
 
 def generate_launch_description():
 
-    # pkg_share = get_package_share_directory('robot_bringup')
+    pkg_share = get_package_share_directory('robot_bringup')
+    ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
     # ================= Heading PID =================
     heading_pid_node = Node(
@@ -21,10 +22,36 @@ def generate_launch_description():
         package='robot_bringup',
         executable='wheel_odometry_node',
         name='wheel_odometry_node',
-        output='screen'
+        output='screen',
+        parameters=[{
+            'use_sim_time': False
+        }]
     )
 
-    # ================= Static TF =================
+    # ================= EKF =================
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[ekf_config]
+    )
+
+    # ================= Odom -> Path =================
+    odom_to_path_node = Node(
+        package='robot_bringup',
+        executable='odom_to_path_node',
+        name='odom_to_path_node',
+        output='screen',
+        parameters=[
+            {'odom_topic': '/odometry/filtered'},
+            {'path_topic': '/path'},
+            {'frame_id': 'odom'},
+            {'max_length': 1000}
+        ]
+    )
+
+    # ================= Static TF (IMU) =================
     static_tf_imu = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -40,5 +67,7 @@ def generate_launch_description():
     return LaunchDescription([
         heading_pid_node,
         wheel_odometry_node,
+        ekf_node,
+        odom_to_path_node,
         static_tf_imu,
     ])

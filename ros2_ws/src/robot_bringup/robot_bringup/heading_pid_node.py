@@ -97,9 +97,21 @@ class HeadingPID(Node):
 
         debug = Float32MultiArray()
 
-        # ===== Enable PID only when moving forward =====
-        if abs(self.cmd_in.linear.x) > self.enable_th:
-            # Lock heading once
+        moving_forward = abs(self.cmd_in.linear.x) > self.enable_th
+        user_turning = abs(self.cmd_in.angular.z) > self.enable_th
+
+        # ===== CASE 1: TURN =====
+        if user_turning:
+            self.heading_locked = False
+            self.integral = 0.0
+            self.prev_error = 0.0
+
+            cmd_out.angular.z = self.cmd_in.angular.z
+            self.cmd_pub.publish(cmd_out)
+            return
+
+        # ===== CASE 2: FORWARD MOVEMENT =====
+        if moving_forward:
             if not self.heading_locked:
                 self.yaw_ref = self.yaw
                 self.integral = 0.0
@@ -109,9 +121,7 @@ class HeadingPID(Node):
                     f"Heading locked at {self.yaw_ref:.3f} rad"
                 )
 
-            # --- PID ---
             error = wrap_angle(self.yaw_ref - self.yaw)
-
             self.integral += error * dt
             derivative = (error - self.prev_error) / dt if dt > 0.0 else 0.0
 
@@ -121,29 +131,20 @@ class HeadingPID(Node):
                 self.kd * derivative
             )
 
-            # Clamp angular output
             u = max(-self.max_angular, min(self.max_angular, u))
-
             cmd_out.angular.z = u
             self.prev_error = error
 
-            # Publish debug
-            debug.data = [
-                error,        # [0] yaw error (rad)
-                u,            # [1] PID output (angular.z)
-                derivative    # [2] derivative of error
-            ]
+            debug.data = [error, u, derivative]
 
+        # ===== CASE 3: STOP =====
         else:
-            # ===== Stop PID when not moving =====
             self.heading_locked = False
             self.integral = 0.0
             self.prev_error = 0.0
             cmd_out.angular.z = 0.0
-
             debug.data = [0.0, 0.0, 0.0]
 
-        # Publish outputs
         self.cmd_pub.publish(cmd_out)
         self.debug_pub.publish(debug)
 

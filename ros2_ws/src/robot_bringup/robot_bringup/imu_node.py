@@ -33,9 +33,9 @@ class ImuNode(Node):
         self.pub_imu = self.create_publisher(Imu, '/imu/data', 10)
 
         # ================= State =================
-        self.yaw = self.prev_yaw    # rad
         self.prev_yaw = 0.0
-        self.gyro_z = 0.0         # rad/s
+        self.yaw = 0.0
+        self.gyro_z = 0.0
 
         # ================= Time =================
         self.start_time = self.get_clock().now()
@@ -120,8 +120,8 @@ class ImuNode(Node):
         # ---------- Linear acceleration (unused) ----------
         imu.linear_acceleration_covariance = [
             -1.0, 0.0, 0.0,
-             0.0,-1.0, 0.0,
-             0.0, 0.0,-1.0
+            0.0, -1.0, 0.0,
+            0.0, 0.0, -1.0
         ]
 
         self.pub_imu.publish(imu)
