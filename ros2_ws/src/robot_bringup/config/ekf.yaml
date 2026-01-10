@@ -23,27 +23,54 @@ ekf_filter_node:
     odom0_queue_size: 10
 
     # Configuration: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
-    odom0_config:
-      [
-        true,
-        true,
-        false,
-        false,
-        false,
-        true,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
+    odom0_config: [
+        true, # x
+        true, # y
+        false, # z
+        false, # roll
+        false, # pitch
+        true, # yaw
+        false, # vx
+        false, # vy
+        false, # vz
+        false, # vroll
+        false, # vpitch
+        false, # vyaw
+        false, # ax
+        false, # ay
+        false, # az
       ]
 
+    # ================= IMU =================
+    imu0: /imu/data
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+
+    # IMU ให้ yaw และ angular velocity z
+    # Configuration: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+    imu0_config: [
+        false, # x
+        false, # y
+        false, # z
+        false, # roll
+        false, # pitch
+        true, # yaw
+        false, # vx
+        false, # vy
+        false, # vz
+        false, # vroll
+        false, # vpitch
+        true, # vyaw
+        false, # ax
+        false, # ay
+        false, # az
+      ]
+
+    # Remove IMU bias (สำคัญสำหรับ gyro)
+    imu0_remove_gravitational_acceleration: false
+
     # ================= Process Noise Covariance =================
-    # 15x15 matrix for [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
     process_noise_covariance:
       [
         0.05,
@@ -126,7 +153,7 @@ ekf_filter_node:
         0.0,
         0.0,
         0.0,
-        0.06,
+        0.03,
         0.0,
         0.0,
         0.0,
@@ -222,7 +249,7 @@ ekf_filter_node:
         0.0,
         0.0,
         0.0,
-        0.02,
+        0.01,
         0.0,
         0.0,
         0.0,
@@ -274,7 +301,6 @@ ekf_filter_node:
       ]
 
     # ================= Initial Estimate Covariance =================
-    # CRITICAL: This must be set properly to avoid NaN
     initial_estimate_covariance:
       [
         1.0,

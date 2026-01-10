@@ -40,7 +40,7 @@ setup(
             'imu_node = robot_bringup.imu_node:main',
             'heading_pid_node = robot_bringup.heading_pid_node:main',
             'odom_to_path_node = robot_bringup.odom_to_path_node:main',
-            'fake_wheel_ticks = robot_bringup.fake_wheel_ticks_node:main',
+            'test_sensor_publisher = robot_bringup.test_sensor_publisher:main',
         ],
     },
 )
