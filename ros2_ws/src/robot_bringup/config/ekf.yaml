@@ -3,6 +3,7 @@ ekf_filter_node:
     # ================= Basic Settings =================
     frequency: 30.0
     sensor_timeout: 0.5
+    enable_resset: true
     two_d_mode: true
     publish_tf: true
     publish_acceleration: false

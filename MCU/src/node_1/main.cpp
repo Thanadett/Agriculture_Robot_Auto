@@ -14,6 +14,7 @@
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/string.h>
 #include <std_msgs/msg/bool.h>
+#include <std_srvs/srv/empty.h>
 #include <sensor_msgs/msg/imu.h>
 #include <geometry_msgs/msg/twist.h>
 
@@ -39,21 +40,20 @@
 #define TOPIC_CMD_VEL "cmd_vel_pid"
 #define TOPIC_IMU_DATA "imu/data"
 #define TOPIC_PID_DEBUG "pid_debug"
-#define TOPIC_JOY_RESET "joy_reset"
 
 // ===== PID Tuning Parameters =====
 #define YAW_RATE_DEADZONE 0.015f
-#define PID_KP 0.8f
-#define PID_KI 0.04f
+#define PID_KP 0.6f
+#define PID_KI 0.025f
 #define PID_KD 0.002f
 #define PID_I_CLAMP_MIN -0.05f
 #define PID_I_CLAMP_MAX 0.05f
-#define PID_OUT_MIN -3.0f
-#define PID_OUT_MAX 3.0f
+#define PID_OUT_MIN -1.5f
+#define PID_OUT_MAX 1.5f
 #define PID_D_LPF 5.0f
 
 // ============================ Debug Macros ============================
-#define DEBUG_ENABLED (g_state != AGENT_CONNECTED)
+#define DEBUG_ENABLED 1
 
 #define DEBUG_PRINT(x)       \
     do                       \
@@ -130,14 +130,12 @@ static rcl_publisher_t pub_heartbeat;
 static rcl_publisher_t pub_imu;
 static rcl_publisher_t pub_pid_debug;
 static rcl_subscription_t sub_cmd_vel;
-static rcl_subscription_t sub_joy_reset;
 
 // Messages
 static std_msgs__msg__Float32MultiArray msg_ticks;
 static std_msgs__msg__String msg_hb;
 static sensor_msgs__msg__Imu msg_imu;
 static geometry_msgs__msg__Twist msg_cmd_vel;
-static std_msgs__msg__Bool msg_joy_reset;
 static std_msgs__msg__Float32MultiArray msg_pid_debug;
 
 // Time sync
@@ -157,6 +155,10 @@ extern uint32_t last_cmd_ms;
 static volatile float g_V_cmd = 0.0f;
 static volatile float g_W_cmd = 0.0f;
 static uint32_t last_fast_us = 0;
+
+rcl_service_t reset_srv;
+std_srvs__srv__Empty_Request reset_req;
+std_srvs__srv__Empty_Response reset_res;
 
 #ifndef TRACK_W_M
 #ifdef WHEEL_SEP
@@ -191,24 +193,22 @@ static void syncTime();
 
 static void on_cmd_vel(const void *msgin);
 static void on_timer(rcl_timer_t *timer, int64_t last_call_time);
-static void on_joy_reset(const void *msgin);
+static void reset_wheel_ticks_cb(const void *req, void *res);
 static void fast_loop_200hz();
 static void publish_imu_100hz();
 
 // ============================ Callbacks ============================
-static void on_joy_reset(const void *msgin)
+static void reset_wheel_ticks_cb(
+    const void *req,
+    void *res)
 {
-    const std_msgs__msg__Bool *m = (const std_msgs__msg__Bool *)msgin;
-    static bool prev = false;
-    bool now = m->data;
+    (void)req;
+    (void)res;
 
-    if (now && !prev)
-    {
-        enc.reset();
-        g_pid_wz.reset();
-        DEBUG_PRINTLN("[RESET] wheel encoders & PID cleared");
-    }
-    prev = now;
+    enc.reset();
+    g_pid_wz.reset();
+
+    DEBUG_PRINTLN("[RESET] encoder & PID reset via service");
 }
 
 static void on_cmd_vel(const void *msgin)
@@ -570,9 +570,9 @@ void loop()
                 g_state = AGENT_DISCONNECTED;
             }
         });
-        if (g_state == AGENT_CONNECTED)
+        if (g_state == AGENT_CONNECTED || g_state == AGENT_AVAILABLE)
         {
-            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(2));
+            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
         }
         break;
 
@@ -651,6 +651,12 @@ static bool createEntities()
     }
     DEBUG_PRINTLN("[INIT] pub imu/data");
 
+    rclc_service_init_default(
+        &reset_srv,
+        &node,
+        ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, Empty),
+        "/wheel_ticks/reset");
+
     // Publisher: pid_debug
     if (rclc_publisher_init_default(&pub_pid_debug, &node,
                                     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
@@ -672,15 +678,6 @@ static bool createEntities()
     }
     DEBUG_PRINTLN("[INIT] sub cmd_vel");
 
-    // Subscriber: joy_reset
-    if (rclc_subscription_init_default(&sub_joy_reset, &node,
-                                       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-                                       TOPIC_JOY_RESET) != RCL_RET_OK)
-    {
-        return false;
-    }
-    DEBUG_PRINTLN("[INIT] sub joy_reset");
-
     // Timer: 20ms (50Hz)
     const uint32_t CTRL_MS = 20;
     if (rclc_timer_init_default(&timer_ctrl, &support, RCL_MS_TO_NS(CTRL_MS), on_timer) != RCL_RET_OK)
@@ -697,7 +694,12 @@ static bool createEntities()
     }
     rclc_executor_add_timer(&executor, &timer_ctrl);
     rclc_executor_add_subscription(&executor, &sub_cmd_vel, &msg_cmd_vel, on_cmd_vel, ON_NEW_DATA);
-    rclc_executor_add_subscription(&executor, &sub_joy_reset, &msg_joy_reset, on_joy_reset, ON_NEW_DATA);
+    rclc_executor_add_service(
+        &executor,
+        &reset_srv,
+        &reset_req,
+        &reset_res,
+        reset_wheel_ticks_cb);
     DEBUG_PRINTLN("[INIT] executor ready");
 
     syncTime();
@@ -707,7 +709,6 @@ static bool createEntities()
 static bool destroyEntities()
 {
     rcl_subscription_fini(&sub_cmd_vel, &node);
-    rcl_subscription_fini(&sub_joy_reset, &node);
     rcl_publisher_fini(&pub_pid_debug, &node);
     rcl_publisher_fini(&pub_imu, &node);
     rcl_publisher_fini(&pub_heartbeat, &node);

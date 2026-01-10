@@ -14,26 +14,7 @@ def generate_launch_description():
         package='robot_bringup',
         executable='heading_pid_node',
         name='heading_pid',
-        output='screen',
-        parameters=[{
-            'kp': 2.7,
-            'ki': 0.0,
-            'kd': 0.02,
-        }]
-    )
-    # ================= IMU =================
-    imu_node = Node(
-        package='robot_bringup',
-        executable='imu_node',
-        name='imu_node',
-        output='screen',
-        parameters=[{
-            'frame_id': 'imu_link',
-            'publish_rate': 50.0,
-            'start_delay': 0.5,
-            'yaw_covariance': 0.1,
-            'gyro_z_covariance': 0.02
-        }]
+        output='screen'
     )
 
     # ================= Wheel Odometry =================
@@ -73,6 +54,22 @@ def generate_launch_description():
         ]
     )
 
+    # ================= Reset Manager =================
+    reset_manager_node = Node(
+        package='robot_bringup',
+        executable='reset_manager_node',
+        name='reset_manager_node',
+        output='screen',
+        parameters=[{
+            'services': [
+                '/wheel_ticks/reset',
+                '/wheel_odometry_node/reset_odometry',
+                '/ekf_node/reset',
+                '/odom_to_path_node/reset'
+            ]
+        }]
+    )
+
     # ================= Static TF (IMU) =================
     static_tf_imu = Node(
         package='tf2_ros',
@@ -89,8 +86,8 @@ def generate_launch_description():
     return LaunchDescription([
         heading_pid_node,
         wheel_odometry_node,
-        imu_node,
         ekf_node,
         odom_to_path_node,
         static_tf_imu,
+        reset_manager_node,
     ])
