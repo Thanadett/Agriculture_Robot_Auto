@@ -48,15 +48,15 @@ class YoloFollower(Node):
         # =====================
         # Parameters
         # =====================
-        self.declare_parameter('camera_id', 4)
-        self.declare_parameter('model_path', '/home/t/392_project/ros2_ws/best.pt')
+        self.declare_parameter('camera_id', 1)
+        self.declare_parameter('model_path', '/home/prukubt/392_Agri/ros2_ws/best.pt')
         self.declare_parameter('conf', 0.5)
 
-        self.declare_parameter('target_area', 40000.0)
-        self.declare_parameter('area_tolerance', 5000.0)
+        self.declare_parameter('target_area', 50000.0)
+        self.declare_parameter('area_tolerance', 3000.0)
 
-        self.declare_parameter('max_linear', 0.3)
-        self.declare_parameter('max_angular', 0.4)
+        self.declare_parameter('max_linear', 0.5)
+        self.declare_parameter('max_angular', 0.7)
 
         self.declare_parameter('image_width', 640)
         self.declare_parameter('image_height', 480)
@@ -279,7 +279,7 @@ class YoloFollower(Node):
 
     def compute_cmd(self, cx, area, cmd):
         pixel_error = cx - (self.W / 2.0)
-        heading_error = (pixel_error / (self.W / 2.0)) * (self.fov_rad / 2.0)
+        heading_error = -(pixel_error / (self.W / 2.0)) * (self.fov_rad / 2.0)
 
         cmd.angular.z = max(-self.max_angular,
                             min(self.max_angular, heading_error))
