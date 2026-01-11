@@ -28,7 +28,13 @@ setup(
         (os.path.join('share', package_name, 'urdf'),
             glob('urdf/*')),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'ultralytics',
+        'torch',
+        'opencv-python',
+    ],
+
     zip_safe=True,
     maintainer='t',
     maintainer_email='n.thanadett@gmail.com',
@@ -42,6 +48,7 @@ setup(
             'odom_to_path_node = robot_bringup.odom_to_path_node:main',
             'test_sensor_publisher = robot_bringup.test_sensor_publisher:main',
             'reset_manager_node = robot_bringup.reset_manager_node:main',
+            'yolo_vision_node = robot_bringup.yolo_vision_node:main',
         ],
     },
 )
