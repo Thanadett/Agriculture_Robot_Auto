@@ -27,32 +27,38 @@ def quaternion_to_yaw(q):
 
 
 # =======================
-# Heading PID Node
+# Heading PID Node (Production)
 # =======================
 class HeadingPID(Node):
     def __init__(self):
         super().__init__('heading_pid')
 
         # ===== Parameters =====
-        self.declare_parameter('kp', 2.7)
+        self.declare_parameter('kp', 3.0)
         self.declare_parameter('ki', 0.0)
-        self.declare_parameter('kd', 0.02)
-        self.declare_parameter('max_angular', 0.5)
-        self.declare_parameter('enable_threshold', 0.03)
+        self.declare_parameter('kd', 0.05)
+        self.declare_parameter('max_angular', 0.7)
+
+        # derivative filter (0–1)
+        self.declare_parameter('d_filter_alpha', 0.2)
+
+        # deadband
+        self.declare_parameter('deadband', 0.005)
+        self.declare_parameter('goal_deadband', 0.003)
 
         self.kp = self.get_parameter('kp').value
         self.ki = self.get_parameter('ki').value
         self.kd = self.get_parameter('kd').value
         self.max_angular = self.get_parameter('max_angular').value
-        self.enable_th = self.get_parameter('enable_threshold').value
+        self.d_alpha = self.get_parameter('d_filter_alpha').value
+        self.deadband = self.get_parameter('deadband').value
+        self.goal_deadband = self.get_parameter('goal_deadband').value
 
         # ===== State =====
         self.yaw = 0.0
-        self.yaw_ref = 0.0
-        self.heading_locked = False
-
         self.integral = 0.0
         self.prev_error = 0.0
+        self.filtered_derivative = 0.0
         self.prev_time = self.get_clock().now()
 
         self.cmd_in = Twist()
@@ -72,13 +78,12 @@ class HeadingPID(Node):
         # 50 Hz control loop
         self.timer = self.create_timer(0.02, self.update)
 
-        self.get_logger().info("Heading PID node (no tf_transformations) started")
+        self.get_logger().info("Heading PID (Production) started")
 
     # =======================
     # Callbacks
     # =======================
     def imu_cb(self, msg: Imu):
-        # Convert quaternion -> yaw
         self.yaw = quaternion_to_yaw(msg.orientation)
 
     def cmd_cb(self, msg: Twist):
@@ -88,62 +93,67 @@ class HeadingPID(Node):
     # Main Control Loop
     # =======================
     def update(self):
+
         now = self.get_clock().now()
         dt = (now - self.prev_time).nanoseconds * 1e-9
         self.prev_time = now
+
+        # Protect against bad dt
+        if dt <= 0.0 or dt > 0.1:
+            return
 
         cmd_out = Twist()
         cmd_out.linear = self.cmd_in.linear
 
         debug = Float32MultiArray()
 
-        moving_forward = abs(self.cmd_in.linear.x) > self.enable_th
-        user_turning = abs(self.cmd_in.angular.z) > self.enable_th
+        # =========================
+        # Vision angular.z = heading_offset
+        # =========================
+        heading_offset = self.cmd_in.angular.z
 
-        # ===== CASE 1: TURN =====
-        if user_turning:
-            self.heading_locked = False
+        desired_yaw = wrap_angle(self.yaw + heading_offset)
+        error = wrap_angle(desired_yaw - self.yaw)
+
+        # Deadband to reduce jitter
+        if abs(error) < self.deadband:
+            error = 0.0
+
+        # =========================
+        # PID
+        # =========================
+        self.integral += error * dt
+
+        # Anti-windup clamp
+        self.integral = max(-1.0, min(1.0, self.integral))
+
+        raw_derivative = (error - self.prev_error) / dt
+
+        # Low-pass filter for derivative
+        self.filtered_derivative = (
+            self.d_alpha * raw_derivative +
+            (1.0 - self.d_alpha) * self.filtered_derivative
+        )
+
+        u = (
+            self.kp * error +
+            self.ki * self.integral +
+            self.kd * self.filtered_derivative
+        )
+
+        # Clamp output
+        u = max(-self.max_angular,
+                min(self.max_angular, u))
+
+        # Goal damping (hard stop when very close)
+        if abs(error) < self.goal_deadband:
+            u = 0.0
             self.integral = 0.0
-            self.prev_error = 0.0
 
-            cmd_out.angular.z = self.cmd_in.angular.z
-            self.cmd_pub.publish(cmd_out)
-            return
+        cmd_out.angular.z = u
+        self.prev_error = error
 
-        # ===== CASE 2: FORWARD MOVEMENT =====
-        if moving_forward:
-            if not self.heading_locked:
-                self.yaw_ref = self.yaw
-                self.integral = 0.0
-                self.prev_error = 0.0
-                self.heading_locked = True
-                self.get_logger().info(
-                    f"Heading locked at {self.yaw_ref:.3f} rad"
-                )
-
-            error = wrap_angle(self.yaw_ref - self.yaw)
-            self.integral += error * dt
-            derivative = (error - self.prev_error) / dt if dt > 0.0 else 0.0
-
-            u = (
-                self.kp * error +
-                self.ki * self.integral +
-                self.kd * derivative
-            )
-
-            u = max(-self.max_angular, min(self.max_angular, u))
-            cmd_out.angular.z = u
-            self.prev_error = error
-
-            debug.data = [error, u, derivative]
-
-        # ===== CASE 3: STOP =====
-        else:
-            self.heading_locked = False
-            self.integral = 0.0
-            self.prev_error = 0.0
-            cmd_out.angular.z = 0.0
-            debug.data = [0.0, 0.0, 0.0]
+        debug.data = [error, u, self.filtered_derivative]
 
         self.cmd_pub.publish(cmd_out)
         self.debug_pub.publish(debug)

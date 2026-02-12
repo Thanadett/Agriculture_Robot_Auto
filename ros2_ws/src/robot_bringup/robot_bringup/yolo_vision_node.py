@@ -48,12 +48,12 @@ class YoloFollower(Node):
         # =====================
         # Parameters
         # =====================
-        self.declare_parameter('camera_id', 1)
-        self.declare_parameter('model_path', '/home/prukubt/392_Agri/ros2_ws/best.pt')
+        self.declare_parameter('camera_id', 4)
+        self.declare_parameter('model_path', '/home/t/392_project/ros2_ws/best.pt')
         self.declare_parameter('conf', 0.5)
 
-        self.declare_parameter('target_area', 50000.0)
-        self.declare_parameter('area_tolerance', 3000.0)
+        self.declare_parameter('target_area', 60000.0)
+        self.declare_parameter('area_tolerance', 5000.0)
 
         self.declare_parameter('max_linear', 0.5)
         self.declare_parameter('max_angular', 0.7)
@@ -61,6 +61,10 @@ class YoloFollower(Node):
         self.declare_parameter('image_width', 640)
         self.declare_parameter('image_height', 480)
         self.declare_parameter('camera_fov_deg', 60.0)
+
+        self.declare_parameter('angle_scale', 0.35)
+        self.declare_parameter('center_deadband_px', 12)
+        self.declare_parameter('goal_area_margin', 1000.0)
 
         # toggle image publisher
         self.declare_parameter('publish_image', True)
@@ -76,6 +80,10 @@ class YoloFollower(Node):
         self.area_tol = self.get_parameter('area_tolerance').value
         self.max_linear = self.get_parameter('max_linear').value
         self.max_angular = self.get_parameter('max_angular').value
+
+        self.angle_scale = self.get_parameter('angle_scale').value
+        self.center_deadband = self.get_parameter('center_deadband_px').value
+        self.goal_margin = self.get_parameter('goal_area_margin').value
 
         self.W = self.get_parameter('image_width').value
         self.H = self.get_parameter('image_height').value
@@ -278,20 +286,56 @@ class YoloFollower(Node):
         self.lost_count = 0
 
     def compute_cmd(self, cx, area, cmd):
+
+        # ===============================
+        # 1) Heading Offset (SETPOINT)
+        # ===============================
         pixel_error = cx - (self.W / 2.0)
-        heading_error = -(pixel_error / (self.W / 2.0)) * (self.fov_rad / 2.0)
 
-        cmd.angular.z = max(-self.max_angular,
-                            min(self.max_angular, heading_error))
+        # deadband ลดการสั่น
+        if abs(pixel_error) < self.center_deadband:
+            pixel_error = 0.0
 
+        heading_offset = -(
+            pixel_error / (self.W / 2.0)
+        ) * (self.fov_rad / 2.0)
+
+        cmd.angular.z = heading_offset
+
+        # ===============================
+        # 2) Distance Control
+        # ===============================
         area_error = self.target_area - area
+
         if abs(area_error) > self.area_tol:
-            cmd.linear.x = max(0.0,
-                               min(self.max_linear, 0.00003 * area_error))
+
+            base_linear = 0.00003 * area_error
+            base_linear = max(0.0,
+                            min(self.max_linear, base_linear))
+
+            # ===============================
+            # 3) Continuous Weighting
+            # ===============================
+            weight = min(
+                1.0,
+                abs(heading_offset) / self.angle_scale
+            )
+
+            smooth_factor = 1.0 - weight
+
+            cmd.linear.x = base_linear * smooth_factor
+
         else:
             cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
 
+        # ======================================
+        # FINAL LOCK CONDITION (with hysteresis)
+        # ======================================
+        if (abs(area_error) < (self.area_tol - self.goal_margin) and
+            abs(heading_offset) < 0.01):
+
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
 
 def main(args=None):
     rclpy.init(args=args)
