@@ -176,14 +176,8 @@ std_srvs__srv__Empty_Response reset_res;
 #define ENCODER_PPR_OUTPUT_DEFAULT 5940.0f
 #endif
 
-static inline float round2(float x)
-{
-    return roundf(x * 100.0f) / 100.0f;
-}
-static inline float m_to_cm_2f(float m)
-{
-    return round2(m * 100.0f);
-}
+static inline float round2(float x) { return roundf(x * 100.0f) / 100.0f; }
+static inline float m_to_cm_2f(float m) { return round2(m * 100.0f); }
 
 // ============================ Forward Decls ============================
 static void rclErrorLoop();
@@ -197,16 +191,30 @@ static void reset_wheel_ticks_cb(const void *req, void *res);
 static void fast_loop_200hz();
 static void publish_imu_100hz();
 
+// ============================ Encoder State ============================
+static bool enc_ready = false;
+static bool just_reset = false;
+
+static float last_fl = 0.0f;
+static float last_fr = 0.0f;
+static float last_rl = 0.0f;
+static float last_rr = 0.0f;
+
 // ============================ Callbacks ============================
-static void reset_wheel_ticks_cb(
-    const void *req,
-    void *res)
+static void reset_wheel_ticks_cb(const void *req, void *res)
 {
     (void)req;
     (void)res;
 
     enc.reset();
     g_pid_wz.reset();
+
+    last_fl = 0.0f;
+    last_fr = 0.0f;
+    last_rl = 0.0f;
+    last_rr = 0.0f;
+
+    just_reset = true;
 
     DEBUG_PRINTLN("[RESET] encoder & PID reset via service");
 }
@@ -218,7 +226,6 @@ static void on_cmd_vel(const void *msgin)
     g_W_cmd = (float)m->angular.z;
 
 #if !USE_INNER_PID
-    // Open-loop mode: forward directly
     cmdVW_to_targets(g_V_cmd, g_W_cmd);
 #endif
 
@@ -229,9 +236,6 @@ static inline bool finite4(float a, float b, float c, float d)
 {
     return isfinite(a) && isfinite(b) && isfinite(c) && isfinite(d);
 }
-
-static bool enc_ready = false;
-static float last_fl = 0, last_fr = 0, last_rl = 0, last_rr = 0;
 
 static void on_timer(rcl_timer_t * /*timer*/, int64_t /*last_call_time*/)
 {
@@ -252,23 +256,7 @@ static void on_timer(rcl_timer_t * /*timer*/, int64_t /*last_call_time*/)
         float rr = enc.totalDistanceM(W_RR);
 
         if (!finite4(fl, fr, rl, rr))
-        {
             return;
-        }
-
-        if (fl < last_fl || fr < last_fr || rl < last_rl || rr < last_rr)
-        {
-            last_fl = fl;
-            last_fr = fr;
-            last_rl = rl;
-            last_rr = rr;
-            return;
-        }
-
-        last_fl = fl;
-        last_fr = fr;
-        last_rl = rl;
-        last_rr = rr;
 
         msg_ticks.data.data[0] = m_to_cm_2f(fl);
         msg_ticks.data.data[1] = m_to_cm_2f(fr);
@@ -278,15 +266,17 @@ static void on_timer(rcl_timer_t * /*timer*/, int64_t /*last_call_time*/)
         RCSOFTCHECK(rcl_publish(&pub_ticks, &msg_ticks, NULL));
     }
 
-    // heartbeat (เหมือนเดิม)
+    // Heartbeat
     static uint32_t hb_ts = 0;
     uint32_t now = millis();
+
     if (now - hb_ts >= 200U)
     {
         const char *hb = "OK";
         msg_hb.data.data = (char *)hb;
         msg_hb.data.size = strlen(hb);
         msg_hb.data.capacity = msg_hb.data.size + 1;
+
         RCSOFTCHECK(rcl_publish(&pub_heartbeat, &msg_hb, NULL));
         hb_ts = now;
     }
@@ -303,7 +293,7 @@ static void fast_loop_200hz()
     }
     uint32_t dt_us = now_us - last_fast_us;
     if (dt_us < 5000U)
-        return; // 200Hz = 5ms
+        return;
     last_fast_us = now_us;
 
     const float dt = dt_us * 1e-6f;
@@ -318,53 +308,42 @@ static void fast_loop_200hz()
         return;
     }
 
-    // 1) Read IMU yaw rate
     g_imu.update();
-    float wz_actual = g_imu.wz; // rad/s from gyro
+    float wz_actual = g_imu.wz;
 
 #if USE_INNER_PID
-    // 2) Apply deadzone to actual rate
     float wz_filtered = wz_actual;
     if (fabs(wz_actual) < YAW_RATE_DEADZONE)
-    {
         wz_filtered = 0.0f;
-    }
 
-    // 3) PID: compute correction
     float u = g_pid_wz.step(g_W_cmd, wz_filtered, dt);
-
-    // 4) Add correction to commanded rate
     float W_eff = g_W_cmd + u;
 
-    // 5) Clamp output
     if (W_eff > PID_OUT_MAX)
         W_eff = PID_OUT_MAX;
     if (W_eff < PID_OUT_MIN)
         W_eff = PID_OUT_MIN;
 
-    // 6) Send to motors
     cmdVW_to_targets(g_V_cmd, W_eff);
 
-    // 7) Debug publish ~40Hz
     static uint32_t dbg_last_ms = 0;
     const uint32_t now_ms = millis();
     if (g_state == AGENT_CONNECTED && (now_ms - dbg_last_ms) >= 40U)
     {
         if (msg_pid_debug.data.size >= 4)
         {
-            msg_pid_debug.data.data[0] = g_W_cmd;     // setpoint
-            msg_pid_debug.data.data[1] = wz_filtered; // actual (filtered)
-            msg_pid_debug.data.data[2] = u;           // PID output
-            msg_pid_debug.data.data[3] = W_eff;       // final command
+            msg_pid_debug.data.data[0] = g_W_cmd;
+            msg_pid_debug.data.data[1] = wz_filtered;
+            msg_pid_debug.data.data[2] = u;
+            msg_pid_debug.data.data[3] = W_eff;
             RCSOFTCHECK(rcl_publish(&pub_pid_debug, &msg_pid_debug, NULL));
         }
         dbg_last_ms = now_ms;
     }
-#else
-    // Open-loop: already handled in on_cmd_vel
 #endif
 }
 
+// ============================ IMU Publishing (100Hz) ============================
 static inline bool quat_valid(float x, float y, float z, float w)
 {
     if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(w))
@@ -373,7 +352,6 @@ static inline bool quat_valid(float x, float y, float z, float w)
     return (n > 1e-6f);
 }
 
-// ============================ IMU Publishing (100Hz) ============================
 static void publish_imu_100hz()
 {
     static uint32_t last_imu_ms = 0;
@@ -382,32 +360,22 @@ static void publish_imu_100hz()
     if (g_state != AGENT_CONNECTED)
         return;
     if (now - last_imu_ms < 10)
-        return; // 100Hz
-
+        return;
     last_imu_ms = now;
 
-    // Fill timestamp
     unsigned long long ros_time_ms = now + time_offset_ms;
     msg_imu.header.stamp.sec = (int32_t)(ros_time_ms / 1000ULL);
     msg_imu.header.stamp.nanosec = (uint32_t)((ros_time_ms % 1000ULL) * 1000000ULL);
 
-    // Frame ID
     const char *frame = "imu_link";
     msg_imu.header.frame_id.data = (char *)frame;
     msg_imu.header.frame_id.size = strlen(frame);
     msg_imu.header.frame_id.capacity = msg_imu.header.frame_id.size + 1;
 
-    float qx = g_imu.qx;
-    float qy = g_imu.qy;
-    float qz = g_imu.qz;
-    float qw = g_imu.qw;
-
+    float qx = g_imu.qx, qy = g_imu.qy, qz = g_imu.qz, qw = g_imu.qw;
     if (!quat_valid(qx, qy, qz, qw))
-    {
         return;
-    }
 
-    // normalize (กัน drift)
     float invn = 1.0f / sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
     qx *= invn;
     qy *= invn;
@@ -419,34 +387,28 @@ static void publish_imu_100hz()
     msg_imu.orientation.z = qz;
     msg_imu.orientation.w = qw;
 
-    // Angular velocity (rad/s)
     msg_imu.angular_velocity.x = g_imu.wx;
     msg_imu.angular_velocity.y = g_imu.wy;
     msg_imu.angular_velocity.z = g_imu.wz;
-
-    // Linear acceleration (m/s²)
     msg_imu.linear_acceleration.x = g_imu.ax;
     msg_imu.linear_acceleration.y = g_imu.ay;
     msg_imu.linear_acceleration.z = g_imu.az;
 
-    // Covariance (BNO055 datasheet values)
-    // Orientation covariance
     for (int i = 0; i < 9; i++)
         msg_imu.orientation_covariance[i] = 0.0;
-    msg_imu.orientation_covariance[0] = 99999.0; // roll
-    msg_imu.orientation_covariance[4] = 99999.0; // pitch
-    msg_imu.orientation_covariance[8] = 0.2;     // yaw
-
-    // Angular velocity covariance
     for (int i = 0; i < 9; i++)
         msg_imu.angular_velocity_covariance[i] = 0.0;
+    for (int i = 0; i < 9; i++)
+        msg_imu.linear_acceleration_covariance[i] = 0.0;
+
+    msg_imu.orientation_covariance[0] = 99999.0;
+    msg_imu.orientation_covariance[4] = 99999.0;
+    msg_imu.orientation_covariance[8] = 0.2;
+
     msg_imu.angular_velocity_covariance[0] = 0.0004;
     msg_imu.angular_velocity_covariance[4] = 0.0004;
     msg_imu.angular_velocity_covariance[8] = 0.0004;
 
-    // Linear acceleration covariance
-    for (int i = 0; i < 9; i++)
-        msg_imu.linear_acceleration_covariance[i] = 0.0;
     msg_imu.linear_acceleration_covariance[0] = 0.01;
     msg_imu.linear_acceleration_covariance[4] = 0.01;
     msg_imu.linear_acceleration_covariance[8] = 0.01;
@@ -468,22 +430,16 @@ void setup()
 #error "Wi-Fi transport not configured"
 #endif
 
-    // Hardware init
     motorDrive_begin();
     enc.begin(true);
     enc.setInvert(ENC_INV_FL < 0, ENC_INV_FR < 0, ENC_INV_RL < 0, ENC_INV_RR < 0);
     enc.setWheelRadius(ENC_WHEEL_RADIUS);
     enc.setPPR(ENCODER_PPR_OUTPUT_DEFAULT);
 
-    // IMU init
     if (!g_imu.begin())
-    {
         DEBUG_PRINTLN("[IMU] BNO055 init FAILED (check wiring)");
-    }
     else
-    {
         DEBUG_PRINTLN("[IMU] BNO055 init OK");
-    }
 
 #if USE_INNER_PID
     g_pid_wz.setGains(PID_KP, PID_KI, PID_KD);
@@ -491,7 +447,6 @@ void setup()
     g_pid_wz.setOutputClamp(PID_OUT_MIN, PID_OUT_MAX);
     g_pid_wz.setDLpf(PID_D_LPF);
     g_pid_wz.reset();
-
     g_V_cmd = 0.0f;
     g_W_cmd = 0.0f;
 
@@ -516,20 +471,15 @@ void setup()
 // ============================ Main Loop ============================
 void loop()
 {
-    // Fast control loop (200Hz)
     fast_loop_200hz();
-
-    // IMU publishing (100Hz)
     publish_imu_100hz();
 
-    // Periodic time sync
     if (millis() - last_time_sync_ms > 10000U)
     {
         syncTime();
         last_time_sync_ms = millis();
     }
 
-    // State machine
     switch (g_state)
     {
     case WAITING_AGENT:
@@ -585,7 +535,6 @@ void loop()
         break;
     }
 
-    // Local serial command
     if (g_state != AGENT_CONNECTED)
     {
         motorDrive_handleSerialOnce();
@@ -603,9 +552,7 @@ static bool createEntities()
 
     rcl_ret_t drc = rcl_init_options_set_domain_id(&init_opts, ROS_DOMAIN_ID_MCU);
     if (drc != RCL_RET_OK)
-    {
         DEBUG_PRINTF("[ERR] set_domain_id rc=%d\n", drc);
-    }
 
     if (rclc_support_init_with_options(&support, 0, NULL, &init_opts, &allocator) != RCL_RET_OK)
     {
@@ -616,18 +563,14 @@ static bool createEntities()
 
     // Node
     if (rclc_node_init_default(&node, "esp32_base", "", &support) != RCL_RET_OK)
-    {
         return false;
-    }
     DEBUG_PRINTLN("[INIT] node esp32_base created");
 
     // Publisher: wheel_ticks
     if (rclc_publisher_init_default(&pub_ticks, &node,
                                     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
                                     TOPIC_WHEEL_TICKS) != RCL_RET_OK)
-    {
         return false;
-    }
     rosidl_runtime_c__float32__Sequence__init(&msg_ticks.data, 4);
     for (int i = 0; i < 4; i++)
         msg_ticks.data.data[i] = 0.0f;
@@ -637,33 +580,21 @@ static bool createEntities()
     if (rclc_publisher_init_default(&pub_heartbeat, &node,
                                     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
                                     TOPIC_HEARTBEAT) != RCL_RET_OK)
-    {
         return false;
-    }
     DEBUG_PRINTLN("[INIT] pub heartbeat");
 
     // Publisher: imu/data
     if (rclc_publisher_init_default(&pub_imu, &node,
                                     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
                                     TOPIC_IMU_DATA) != RCL_RET_OK)
-    {
         return false;
-    }
     DEBUG_PRINTLN("[INIT] pub imu/data");
-
-    rclc_service_init_default(
-        &reset_srv,
-        &node,
-        ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, Empty),
-        "/wheel_ticks/reset");
 
     // Publisher: pid_debug
     if (rclc_publisher_init_default(&pub_pid_debug, &node,
                                     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
                                     TOPIC_PID_DEBUG) != RCL_RET_OK)
-    {
         return false;
-    }
     rosidl_runtime_c__float32__Sequence__init(&msg_pid_debug.data, 4);
     for (int i = 0; i < 4; i++)
         msg_pid_debug.data.data[i] = 0.0f;
@@ -673,34 +604,67 @@ static bool createEntities()
     if (rclc_subscription_init_default(&sub_cmd_vel, &node,
                                        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
                                        TOPIC_CMD_VEL) != RCL_RET_OK)
-    {
         return false;
-    }
     DEBUG_PRINTLN("[INIT] sub cmd_vel");
 
     // Timer: 20ms (50Hz)
     const uint32_t CTRL_MS = 20;
-    if (rclc_timer_init_default(&timer_ctrl, &support, RCL_MS_TO_NS(CTRL_MS), on_timer) != RCL_RET_OK)
-    {
+    if (rclc_timer_init_default(&timer_ctrl, &support,
+                                RCL_MS_TO_NS(CTRL_MS), on_timer) != RCL_RET_OK)
         return false;
-    }
     DEBUG_PRINTLN("[INIT] timer 20ms");
 
-    // Executor
-    executor = rclc_executor_get_zero_initialized_executor();
-    if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK)
+    // ---------------------------------------------------------------
+    // FIX: Service init พร้อมเช็ค return value
+    // ---------------------------------------------------------------
+    rcl_ret_t srv_rc = rclc_service_init_default(
+        &reset_srv,
+        &node,
+        ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, Empty),
+        "/wheel_ticks/reset");
+
+    if (srv_rc != RCL_RET_OK)
     {
+        DEBUG_PRINTF("[ERR] service init failed rc=%d\n", srv_rc);
         return false;
     }
-    rclc_executor_add_timer(&executor, &timer_ctrl);
-    rclc_executor_add_subscription(&executor, &sub_cmd_vel, &msg_cmd_vel, on_cmd_vel, ON_NEW_DATA);
-    rclc_executor_add_service(
-        &executor,
-        &reset_srv,
-        &reset_req,
-        &reset_res,
-        reset_wheel_ticks_cb);
-    DEBUG_PRINTLN("[INIT] executor ready");
+    DEBUG_PRINTLN("[INIT] service /wheel_ticks/reset OK");
+
+    // ---------------------------------------------------------------
+    // FIX: executor handles = 4
+    //   timer(1) + subscription(1) + service(2) = 4
+    //   service ใช้ 2 handles ใน micro-ROS (request + response)
+    // ---------------------------------------------------------------
+    executor = rclc_executor_get_zero_initialized_executor();
+    if (rclc_executor_init(&executor, &support.context, 4, &allocator) != RCL_RET_OK)
+        return false;
+
+    // ---------------------------------------------------------------
+    // FIX: เช็ค return value ทุก executor_add
+    // ---------------------------------------------------------------
+    if (rclc_executor_add_timer(&executor, &timer_ctrl) != RCL_RET_OK)
+    {
+        DEBUG_PRINTLN("[ERR] executor_add_timer failed");
+        return false;
+    }
+
+    if (rclc_executor_add_subscription(&executor, &sub_cmd_vel,
+                                       &msg_cmd_vel, on_cmd_vel,
+                                       ON_NEW_DATA) != RCL_RET_OK)
+    {
+        DEBUG_PRINTLN("[ERR] executor_add_subscription failed");
+        return false;
+    }
+
+    if (rclc_executor_add_service(&executor, &reset_srv,
+                                  &reset_req, &reset_res,
+                                  reset_wheel_ticks_cb) != RCL_RET_OK)
+    {
+        DEBUG_PRINTLN("[ERR] executor_add_service failed");
+        return false;
+    }
+
+    DEBUG_PRINTLN("[INIT] executor ready (4 handles: timer + sub + service)");
 
     syncTime();
     return true;
@@ -709,6 +673,7 @@ static bool createEntities()
 static bool destroyEntities()
 {
     rcl_subscription_fini(&sub_cmd_vel, &node);
+    rcl_service_fini(&reset_srv, &node); // FIX: เพิ่ม fini service ด้วย
     rcl_publisher_fini(&pub_pid_debug, &node);
     rcl_publisher_fini(&pub_imu, &node);
     rcl_publisher_fini(&pub_heartbeat, &node);

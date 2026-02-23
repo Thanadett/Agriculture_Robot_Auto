@@ -10,12 +10,12 @@ def generate_launch_description():
     ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
     # ================= Heading PID =================
-    heading_pid_node = Node(
-        package='robot_bringup',
-        executable='heading_pid_node',
-        name='heading_pid',
-        output='screen'
-    )
+    # heading_pid_node = Node(
+    #     package='robot_bringup',
+    #     executable='heading_pid_node',
+    #     name='heading_pid',
+    #     output='screen'
+    # )
 
     # ================= Wheel Odometry =================
     wheel_odometry_node = Node(
@@ -84,7 +84,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        heading_pid_node,
+        # heading_pid_node,
         wheel_odometry_node,
         ekf_node,
         odom_to_path_node,

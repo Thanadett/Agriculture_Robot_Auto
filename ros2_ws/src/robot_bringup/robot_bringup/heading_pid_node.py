@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 
@@ -10,7 +11,7 @@ import math
 
 
 # =======================
-# Utility functions
+# Utility
 # =======================
 def wrap_angle(angle):
     """Wrap angle to [-pi, pi]"""
@@ -18,67 +19,58 @@ def wrap_angle(angle):
 
 
 def quaternion_to_yaw(q):
-    """
-    Convert quaternion to yaw (rad)
-    """
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
 
 
 # =======================
-# Heading PID Node (Production)
+# Node
 # =======================
 class HeadingPID(Node):
+
     def __init__(self):
         super().__init__('heading_pid')
 
         # ===== Parameters =====
-        self.declare_parameter('kp', 3.0)
-        self.declare_parameter('ki', 0.0)
-        self.declare_parameter('kd', 0.05)
-        self.declare_parameter('max_angular', 0.7)
+        self.declare_parameter('kp',               1.8)
+        self.declare_parameter('ki',               0.0)
+        self.declare_parameter('kd',               0.02)
+        self.declare_parameter('max_angular',      0.5)
+        self.declare_parameter('enable_threshold', 0.03)
 
-        # derivative filter (0–1)
-        self.declare_parameter('d_filter_alpha', 0.2)
-
-        # deadband
-        self.declare_parameter('deadband', 0.005)
-        self.declare_parameter('goal_deadband', 0.003)
-
-        self.kp = self.get_parameter('kp').value
-        self.ki = self.get_parameter('ki').value
-        self.kd = self.get_parameter('kd').value
+        self.kp          = self.get_parameter('kp').value
+        self.ki          = self.get_parameter('ki').value
+        self.kd          = self.get_parameter('kd').value
         self.max_angular = self.get_parameter('max_angular').value
-        self.d_alpha = self.get_parameter('d_filter_alpha').value
-        self.deadband = self.get_parameter('deadband').value
-        self.goal_deadband = self.get_parameter('goal_deadband').value
+        self.enable_th   = self.get_parameter('enable_threshold').value
 
         # ===== State =====
-        self.yaw = 0.0
-        self.integral = 0.0
+        self.yaw            = 0.0
+        self.yaw_ref        = 0.0
+        self.heading_locked = False
+
+        self.integral   = 0.0
         self.prev_error = 0.0
-        self.filtered_derivative = 0.0
-        self.prev_time = self.get_clock().now()
+        self.prev_time  = self.get_clock().now()
 
         self.cmd_in = Twist()
 
         # ===== ROS I/O =====
-        self.create_subscription(Imu, '/imu/data', self.imu_cb, 10)
-        self.create_subscription(Twist, '/cmd_vel', self.cmd_cb, 10)
+        self.create_subscription(Imu,   '/imu/data', self.imu_cb, 10)
+        self.create_subscription(Twist, '/cmd_vel',  self.cmd_cb, 10)
 
-        self.cmd_pub = self.create_publisher(
-            Twist, '/cmd_vel_pid', 10
-        )
+        self.cmd_pub   = self.create_publisher(Twist,             '/cmd_vel_pid', 10)
+        self.debug_pub = self.create_publisher(Float32MultiArray, '/pid_debug',   10)
 
-        self.debug_pub = self.create_publisher(
-            Float32MultiArray, '/pid_debug', 10
-        )
-
-        # 50 Hz control loop
+        # 50 Hz
         self.timer = self.create_timer(0.02, self.update)
 
-        self.get_logger().info("Heading PID (Production) started")
+        self.get_logger().info(
+            "HeadingPID started\n"
+            "  subscribe: /cmd_vel  (from YoloFollower)\n"
+            "  publish:   /cmd_vel_pid  (to robot)"
+        )
 
     # =======================
     # Callbacks
@@ -90,70 +82,68 @@ class HeadingPID(Node):
         self.cmd_in = msg
 
     # =======================
-    # Main Control Loop
+    # Control Loop (50 Hz)
     # =======================
     def update(self):
-
         now = self.get_clock().now()
-        dt = (now - self.prev_time).nanoseconds * 1e-9
+        dt  = (now - self.prev_time).nanoseconds * 1e-9
         self.prev_time = now
 
-        # Protect against bad dt
-        if dt <= 0.0 or dt > 0.1:
-            return
-
-        cmd_out = Twist()
+        cmd_out        = Twist()
         cmd_out.linear = self.cmd_in.linear
 
         debug = Float32MultiArray()
 
-        # =========================
-        # Vision angular.z = heading_offset
-        # =========================
-        heading_offset = self.cmd_in.angular.z
+        moving_forward = abs(self.cmd_in.linear.x)  > self.enable_th
+        user_turning   = abs(self.cmd_in.angular.z) > self.enable_th
 
-        desired_yaw = wrap_angle(self.yaw + heading_offset)
-        error = wrap_angle(desired_yaw - self.yaw)
+        # ===== CASE 1: TURNING (TRACK / ARC_APPROACH) =====
+        # YoloFollower ส่ง angular.z != 0 → pass-through ทันที
+        # ไม่ lock heading เพื่อไม่ขัดการควบคุมของ vision
+        if user_turning:
+            self.heading_locked = False
+            self.integral       = 0.0
+            self.prev_error     = 0.0
 
-        # Deadband to reduce jitter
-        if abs(error) < self.deadband:
-            error = 0.0
+            cmd_out.angular.z = self.cmd_in.angular.z
+            self.cmd_pub.publish(cmd_out)
+            return
 
-        # =========================
-        # PID
-        # =========================
-        self.integral += error * dt
+        # ===== CASE 2: FORWARD, NO TURNING (FINAL_APPROACH) =====
+        # YoloFollower ส่ง linear.x > 0, angular.z = 0
+        # → lock yaw ณ เฟรมแรก แล้วใช้ PID แก้ drift ตลอดการเดิน
+        if moving_forward:
+            if not self.heading_locked:
+                self.yaw_ref        = self.yaw
+                self.integral       = 0.0
+                self.prev_error     = 0.0
+                self.heading_locked = True
+                self.get_logger().info(
+                    f"Heading locked at {math.degrees(self.yaw_ref):.1f} deg"
+                )
 
-        # Anti-windup clamp
-        self.integral = max(-1.0, min(1.0, self.integral))
+            error      = wrap_angle(self.yaw_ref - self.yaw)
+            self.integral += error * dt
+            derivative = (error - self.prev_error) / dt if dt > 0.0 else 0.0
 
-        raw_derivative = (error - self.prev_error) / dt
+            u = (self.kp * error +
+                 self.ki * self.integral +
+                 self.kd * derivative)
 
-        # Low-pass filter for derivative
-        self.filtered_derivative = (
-            self.d_alpha * raw_derivative +
-            (1.0 - self.d_alpha) * self.filtered_derivative
-        )
+            u = max(-self.max_angular, min(self.max_angular, u))
 
-        u = (
-            self.kp * error +
-            self.ki * self.integral +
-            self.kd * self.filtered_derivative
-        )
+            cmd_out.angular.z = u
+            self.prev_error   = error
 
-        # Clamp output
-        u = max(-self.max_angular,
-                min(self.max_angular, u))
+            debug.data = [error, u, derivative, float(self.yaw_ref), float(self.yaw)]
 
-        # Goal damping (hard stop when very close)
-        if abs(error) < self.goal_deadband:
-            u = 0.0
-            self.integral = 0.0
-
-        cmd_out.angular.z = u
-        self.prev_error = error
-
-        debug.data = [error, u, self.filtered_derivative]
+        # ===== CASE 3: STOP (SEARCH / CONFIRM) =====
+        else:
+            self.heading_locked = False
+            self.integral       = 0.0
+            self.prev_error     = 0.0
+            cmd_out.angular.z   = 0.0
+            debug.data          = [0.0, 0.0, 0.0, 0.0, 0.0]
 
         self.cmd_pub.publish(cmd_out)
         self.debug_pub.publish(debug)
