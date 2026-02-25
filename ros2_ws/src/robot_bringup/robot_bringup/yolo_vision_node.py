@@ -1,4 +1,16 @@
-#!/home/t/yolo_env/bin/python
+#!/home/prukubt/yolo_env/bin/python
+"""
+robot_follower_v5.py
+Flow:
+  SEARCH/CONFIRM → TRACK → FINAL_APPROACH → DONE
+
+TRACK   : เดินหน้าด้วย PID จนขอบบนของ object (top_y) ชนแถบล่างของภาพ
+          (top_y >= H - BOTTOM_MARGIN_PX)
+
+FINAL_APPROACH:
+  - FA_APPROACH : ค่อยๆ เดินเข้าหา tag จนกว่า z < final_stop_distance_m
+  - FA_DONE     : หยุดรอ state ถัดไป (publish pose แล้ว)
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -16,9 +28,9 @@ from ultralytics import YOLO
 from pupil_apriltags import Detector
 
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
 # STATES
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
 STATE_SEARCH         = 0
 STATE_CONFIRM        = 1
 STATE_TRACK          = 2
@@ -33,76 +45,93 @@ STATE_NAME = {
     STATE_FINAL_APPROACH: "FINAL_APPROACH",
 }
 
-# ─────────────────────────────────────────────
-# FINAL_APPROACH sub-states
-# ─────────────────────────────────────────────
-FA_APPROACH   = "approach"    # เดินหน้าจนถึง 30cm
-FA_READ_TAG   = "read_tag"    # หยุดอ่าน AprilTag
-FA_ADVANCE    = "advance"     # เดินหน้าต่อตามระยะ z ที่อ่านได้
-FA_DONE       = "done"        # เสร็จ
+FA_APPROACH = "approach"
+FA_DONE     = "done"
 
 TARGET_CLASS_ID     = 0
-YOLO_INTERVAL       = 5
-REDETECT_INTERVAL   = 15
+YOLO_INTERVAL       = 3
 LOCK_CONFIRM_FRAMES = 3
-MAX_LOST_FRAMES     = 8
-MAX_CENTER_JUMP     = 120
-MIN_TRACK_FRAMES    = 30
+MAX_LOST_FRAMES     = 10
+MIN_TRACK_FRAMES    = 15
+EMA_ALPHA           = 0.5
 
-# AprilTag
-TAG_INTERVAL      = 3
+# ── ขอบล่างของภาพที่ใช้เป็น setpoint ───────────────────────────
+# top_y >= H - BOTTOM_MARGIN_PX → ถือว่า object ชนขอบล่างแล้ว
+BOTTOM_MARGIN_PX = 20   # pixel buffer จากขอบจริง (ปรับได้)
+
+TAG_INTERVAL      = 5
 TAG_READ_REQUIRED = 8
 
 
+# ════════════════════════════════════════════════════════════════
+# EMA BBox Smoother  (ใช้ cx, top_y, area)
+# ════════════════════════════════════════════════════════════════
+class EMABoxSmoother:
+    def __init__(self, alpha: float = 0.5):
+        self.alpha = alpha
+        self.cx = self.top_y = self.area = None
+        self.valid = False
+
+    def update(self, cx, top_y, area):
+        if not self.valid:
+            self.cx = cx; self.top_y = top_y; self.area = area
+            self.valid = True
+        else:
+            a = self.alpha
+            self.cx    = a * cx    + (1 - a) * self.cx
+            self.top_y = a * top_y + (1 - a) * self.top_y
+            self.area  = a * area  + (1 - a) * self.area
+
+    def reset(self):
+        self.cx = self.top_y = self.area = None
+        self.valid = False
+
+    @property
+    def values(self):
+        return self.cx, self.top_y, self.area
+
+
+# ════════════════════════════════════════════════════════════════
+# MAIN NODE
+# ════════════════════════════════════════════════════════════════
 class RobotFollower(Node):
 
     def __init__(self):
         super().__init__('robot_follower')
 
         # ── Parameters ──────────────────────────────────────────────
-        self.declare_parameter('camera_id',   5)
+        self.declare_parameter('camera_id',    0)
         self.declare_parameter('image_width',  640)
         self.declare_parameter('image_height', 480)
-        self.declare_parameter('model_path',  '/home/t/392_project/ros2_ws/best.pt')
-        self.declare_parameter('conf',        0.5)
-
-        self.declare_parameter('max_linear',  0.2)
-        self.declare_parameter('max_angular', 0.4)
-
-        self.declare_parameter('camera_vertical_fov_deg', 45.0)
+        self.declare_parameter('model_path',   '/home/prukubt/392_Agri/ros2_ws/best.pt')
+        self.declare_parameter('conf',         0.5)
+        self.declare_parameter('max_linear',   0.4)
+        self.declare_parameter('max_angular',  0.6)
+        self.declare_parameter('camera_vertical_fov_deg',         45.0)
         self.declare_parameter('center_deadband_px',               12)
-        self.declare_parameter('target_vertical_angle',            -0.25)
         self.declare_parameter('angle_deadband_rad',               0.03)
         self.declare_parameter('angular_deadband_when_stopped_px', 30)
+        self.declare_parameter('max_bbox_change_ratio',            1.8)
+        self.declare_parameter('ema_alpha',                        EMA_ALPHA)
+        self.declare_parameter('bottom_margin_px',    BOTTOM_MARGIN_PX)  # pixel buffer ขอบล่าง
+        self.declare_parameter('min_stopped_frames',  3)
 
-        self.declare_parameter('max_bbox_change_ratio', 1.5)
-        self.declare_parameter('tracker_type',          'KCF')
+        # Final approach (AprilTag)
+        self.declare_parameter('final_stop_distance_m', 0.40)  # หยุดเมื่อ z < cm 
+        self.declare_parameter('final_forward_speed',   0.10)  # ความเร็ว final approach
+        self.declare_parameter('final_tag_timeout_sec', 3.0)   # safety stop ถ้าไม่เห็น tag
 
-        self.declare_parameter('final_stop_distance_m', 0.30)   # หยุดที่ z < ค่านี้
-        self.declare_parameter('final_forward_speed',   0.2)
-        self.declare_parameter('final_tag_timeout_sec', 1.5)
-        self.declare_parameter('min_stopped_frames',    3)
-
-        # ── [ใหม่] ระยะ advance หลังอ่าน tag ─────────────────────────
-        # advance_speed: ความเร็วเดินหน้าหลังอ่าน tag ได้แล้ว (m/s)
-        self.declare_parameter('advance_speed',        0.15)
-        # read_tag_timeout_sec: timeout อ่าน tag ถ้าอ่านไม่ครบให้ใช้ค่าล่าสุด
-        self.declare_parameter('read_tag_timeout_sec', 5.0)
-        # advance_margin_m: offset ลบออกจากระยะ z (เผื่อหยุดก่อนชน)
-        self.declare_parameter('advance_margin_m',     0.05)
-
-        # ── Camera Intrinsics ────────────────────────────────────────
-        self.declare_parameter('fx', 651.50491737)
-        self.declare_parameter('fy', 650.39077601)
-        self.declare_parameter('cx', 320.62707882)
-        self.declare_parameter('cy', 236.91812436)
+        # Camera intrinsics
+        self.declare_parameter('fx',      651.50491737)
+        self.declare_parameter('fy',      650.39077601)
+        self.declare_parameter('cx',      320.62707882)
+        self.declare_parameter('cy',      236.91812436)
         self.declare_parameter('dist_k1',  0.21581633)
         self.declare_parameter('dist_k2', -1.09508649)
         self.declare_parameter('dist_p1', -0.00213472)
         self.declare_parameter('dist_p2',  0.00169510)
         self.declare_parameter('dist_k3',  1.64003200)
         self.declare_parameter('tag_size', 0.042)
-
         self.declare_parameter('publish_image', True)
 
         # ── Load params ─────────────────────────────────────────────
@@ -112,42 +141,30 @@ class RobotFollower(Node):
 
         self.max_linear  = self.get_parameter('max_linear').value
         self.max_angular = self.get_parameter('max_angular').value
-
         self.W = self.get_parameter('image_width').value
         self.H = self.get_parameter('image_height').value
 
         self.vfov_rad = math.radians(
-            self.get_parameter('camera_vertical_fov_deg').value
-        )
-
+            self.get_parameter('camera_vertical_fov_deg').value)
         self.center_deadband          = self.get_parameter('center_deadband_px').value
-        self.target_v_angle           = self.get_parameter('target_vertical_angle').value
         self.angle_deadband           = self.get_parameter('angle_deadband_rad').value
         self.angular_deadband_stopped = self.get_parameter('angular_deadband_when_stopped_px').value
+        self.max_bbox_change          = self.get_parameter('max_bbox_change_ratio').value
+        self.ema_alpha                = self.get_parameter('ema_alpha').value
+        self.bottom_margin            = self.get_parameter('bottom_margin_px').value
+        self.min_stopped_frames       = self.get_parameter('min_stopped_frames').value
+        self.final_stop_dist          = self.get_parameter('final_stop_distance_m').value
+        self.final_speed              = self.get_parameter('final_forward_speed').value
+        self.final_tag_timeout        = self.get_parameter('final_tag_timeout_sec').value
 
-        self.max_bbox_change     = self.get_parameter('max_bbox_change_ratio').value
-        self.tracker_type        = self.get_parameter('tracker_type').value
-        self.final_stop_dist     = self.get_parameter('final_stop_distance_m').value
-        self.final_speed         = self.get_parameter('final_forward_speed').value
-        self.final_tag_timeout   = self.get_parameter('final_tag_timeout_sec').value
-        self.min_stopped_frames  = self.get_parameter('min_stopped_frames').value
-
-        self.advance_speed       = self.get_parameter('advance_speed').value
-        self.read_tag_timeout    = self.get_parameter('read_tag_timeout_sec').value
-        self.advance_margin      = self.get_parameter('advance_margin_m').value
-
-        # ── Camera Intrinsics ────────────────────────────────────────
-        fx = self.get_parameter('fx').value
-        fy = self.get_parameter('fy').value
-        cx = self.get_parameter('cx').value
-        cy = self.get_parameter('cy').value
-
-        self.camera_params = (fx, fy, cx, cy)
-        self.camera_matrix = np.array([
-            [fx,  0, cx],
-            [ 0, fy, cy],
-            [ 0,  0,  1]
-        ], dtype=np.float64)
+        self.fx     = self.get_parameter('fx').value
+        self.fy     = self.get_parameter('fy').value
+        self.cx_cam = self.get_parameter('cx').value
+        self.cy_cam = self.get_parameter('cy').value
+        self.camera_matrix = np.array(
+            [[self.fx, 0, self.cx_cam],
+             [0, self.fy, self.cy_cam],
+             [0, 0, 1]], dtype=np.float64)
         self.dist_coeffs = np.array([[
             self.get_parameter('dist_k1').value,
             self.get_parameter('dist_k2').value,
@@ -156,77 +173,70 @@ class RobotFollower(Node):
             self.get_parameter('dist_k3').value,
         ]], dtype=np.float64)
         self.tag_size = self.get_parameter('tag_size').value
-
         self.new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(
             self.camera_matrix, self.dist_coeffs,
-            (self.W, self.H), 1, (self.W, self.H)
-        )
+            (self.W, self.H), 1, (self.W, self.H))
 
-        # ── Detectors ────────────────────────────────────────────────
+        # ── setpoint pixel y (ขอบล่างของภาพ - margin) ───────────────
+        self.setpoint_y = self.H - self.bottom_margin  # เส้นที่ top_y ต้องชน
+
+        # ── YOLO ────────────────────────────────────────────────────
         self.model = YOLO(model_path)
+        _dummy = np.zeros((self.H, self.W, 3), dtype=np.uint8)
+        self.model(_dummy, conf=self.conf, verbose=False)
+        self.get_logger().info("YOLO warm-up done")
 
+        # ── AprilTag ─────────────────────────────────────────────────
         self.at_detector = Detector(
             families="tagStandard52h13",
-            nthreads=4,
+            nthreads=2,
             quad_decimate=1.5,
-            refine_edges=True,
+            refine_edges=1,
         )
 
-        # ── ROS Publishers & Subscribers ─────────────────────────────
-        self.cmd_pub   = self.create_publisher(Twist,             '/cmd_vel_pid',      10)
-        self.debug_pub = self.create_publisher(Float32MultiArray, '/vision_debug', 10)
-        self.image_pub = self.create_publisher(Image,             '/vision/image', 10)
-
-        self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance', 10)
-        self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',           10)
-        self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',   10)
-        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',               10)
-
-        self.wheel_sub = self.create_subscription(
-            Float32MultiArray, '/wheel_ticks', self.wheel_ticks_callback, 10
-        )
+        # ── ROS I/O ──────────────────────────────────────────────────
+        self.cmd_pub      = self.create_publisher(Twist,             '/cmd_vel_pid',  1)
+        self.debug_pub    = self.create_publisher(Float32MultiArray, '/vision_debug', 5)
+        self.image_pub    = self.create_publisher(Image,             '/vision/image', 1)
+        self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance', 5)
+        self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',           5)
+        self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',   5)
+        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',               1)
+        self.wheel_sub    = self.create_subscription(
+            Float32MultiArray, '/wheel_ticks', self.wheel_ticks_callback, 5)
         self.reset_client = self.create_client(Empty, '/wheel_ticks/reset')
-
         self.bridge = CvBridge()
 
         # ── Camera ───────────────────────────────────────────────────
         self.cap = cv2.VideoCapture(cam_id)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.W)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # ── YOLO State ───────────────────────────────────────────────
-        self.state         = STATE_SEARCH
-        self.tracker       = None
-        self.frame_count   = 0
-        self.confirm_count = 0
-
-        self.prev_cx           = None
-        self.prev_bbox_area    = None
-        self.current_ref_y     = None
-        self.lost_count        = 0
+        # ── State ────────────────────────────────────────────────────
+        self.state               = STATE_SEARCH
+        self.frame_count         = 0
+        self.confirm_count       = 0
+        self.smoother            = EMABoxSmoother(alpha=self.ema_alpha)
+        self.lost_count          = 0
         self.track_frame_count   = 0
         self.stopped_frame_count = 0
+        self.current_ref_y       = None
+        self.wheel_ticks         = [0.0, 0.0, 0.0, 0.0]
 
-        # ── Wheel encoder ────────────────────────────────────────────
-        self.wheel_ticks = [0.0, 0.0, 0.0, 0.0]
-
-        # ── AprilTag state ───────────────────────────────────────────
-        self.tag_read_count    = 0
-        self.tag_published     = False
-        self.last_tag_data     = None
-        self.last_tag_time     = None
+        # AprilTag
+        self.tag_read_count      = 0
+        self.tag_published       = False
+        self.last_tag_data       = None   # (ab, c, de, x, y, z, yaw)
+        self.last_tag_time       = None
         self.final_approach_done = False
-
-        # ── Final approach sub-state ─────────────────────────────────
-        self.fa_sub_state       = FA_APPROACH
-        self.fa_read_tag_start  = None   # เวลาเริ่มอ่าน tag (สำหรับ timeout)
-        self.fa_advance_target  = None   # ระยะที่ต้องเดิน (เมตร, แปลงจาก z → cm ผ่าน wheel)
-        self.fa_advance_start   = None   # wheel distance ตอนเริ่ม advance (cm)
+        self.fa_sub_state        = FA_APPROACH
 
         self.timer = self.create_timer(0.05, self.update)
         self.get_logger().info(
-            f"RobotFollower started | tracker={self.tracker_type} | "
-            f"tag_size={self.tag_size}m | stop_dist={self.final_stop_dist}m"
+            f"RobotFollower v5 started | "
+            f"setpoint_y={self.setpoint_y}px | "
+            f"final_stop={self.final_stop_dist}m"
         )
 
     # ════════════════════════════════════════════════════════════════
@@ -236,89 +246,42 @@ class RobotFollower(Node):
         self.wheel_ticks = list(msg.data)
 
     def get_average_wheel_distance(self):
-        if len(self.wheel_ticks) >= 4:
-            return sum(self.wheel_ticks) / 4.0
-        return 0.0
+        return sum(self.wheel_ticks) / 4.0 if len(self.wheel_ticks) >= 4 else 0.0
 
     def reset_wheel_ticks(self):
         if not self.reset_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn('Reset service not available')
             return
-        req    = Empty.Request()
-        future = self.reset_client.call_async(req)
+        future = self.reset_client.call_async(Empty.Request())
         def cb(f):
             try:
                 f.result()
-                self.get_logger().info('Wheel ticks reset OK')
             except Exception as e:
                 self.get_logger().error(f'Reset failed: {e}')
         future.add_done_callback(cb)
 
     # ════════════════════════════════════════════════════════════════
-    # TRACKER HELPERS
+    # HELPERS
     # ════════════════════════════════════════════════════════════════
     def reset_tracking_state(self):
-        self.prev_cx             = None
-        self.prev_bbox_area      = None
-        self.current_ref_y       = None
+        self.smoother.reset()
+        self.lost_count = self.track_frame_count = self.stopped_frame_count = 0
+        self.current_ref_y = None
+
+    def _enter_final_approach(self):
+        self.tag_read_count      = 0
+        self.tag_published       = False
+        self.last_tag_data       = None
+        self.last_tag_time       = None
+        self.final_approach_done = False
+        self.fa_sub_state        = FA_APPROACH
+        self.state               = STATE_FINAL_APPROACH
         self.stopped_frame_count = 0
-        self.lost_count          = 0
-        self.track_frame_count   = 0
+        self.get_logger().info("[STATE] → FINAL_APPROACH")
 
-    def reset_tracker_only(self):
-        self.prev_cx        = None
-        self.prev_bbox_area = None
-        self.lost_count     = 0
-
-    def init_tracker(self, frame, box, full_reset=True):
-        x1, y1, x2, y2 = box
-        bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
-        if self.tracker_type.upper() == 'KCF':
-            self.tracker = (cv2.TrackerKCF_create()
-                            if hasattr(cv2, 'TrackerKCF_create')
-                            else cv2.legacy.TrackerKCF_create())
-        else:
-            self.tracker = (cv2.TrackerCSRT_create()
-                            if hasattr(cv2, 'TrackerCSRT_create')
-                            else cv2.legacy.TrackerCSRT_create())
-        self.tracker.init(frame, bbox)
-        if full_reset:
-            self.reset_tracking_state()
-        else:
-            self.reset_tracker_only()
-
-    # ════════════════════════════════════════════════════════════════
-    # CONTROL
-    # ════════════════════════════════════════════════════════════════
-    def compute_cmd(self, cx, top_y, cmd):
-        pixel_error_y  = top_y - (self.H / 2.0)
-        vertical_angle = -(pixel_error_y / (self.H / 2.0)) * (self.vfov_rad / 2.0)
-        angle_error    = self.target_v_angle - vertical_angle
-        is_stopped     = abs(angle_error) <= self.angle_deadband
-
-        pixel_error_x = cx - (self.W / 2.0)
-        if is_stopped:
-            if abs(pixel_error_x) < self.angular_deadband_stopped:
-                pixel_error_x = 0.0
-        else:
-            if abs(pixel_error_x) < self.center_deadband:
-                pixel_error_x = 0.0
-
-        heading       = -(pixel_error_x / (self.W / 2.0)) * (self.vfov_rad / 2.0)
-        cmd.angular.z = max(-self.max_angular, min(self.max_angular, heading))
-
-        if not is_stopped:
-            cmd.linear.x = self.max_linear if angle_error < 0 else 0.0
-        else:
-            cmd.linear.x = 0.0
-
-    # ════════════════════════════════════════════════════════════════
-    # YOLO DETECTION
-    # ════════════════════════════════════════════════════════════════
     def detect_best(self, frame):
-        results   = self.model(frame, conf=self.conf, verbose=False)
-        best_box  = None
-        best_area = -1
+        results  = self.model(frame, conf=self.conf, verbose=False)
+        best_box = None; best_area = -1
         for box in results[0].boxes:
             if int(box.cls[0]) != TARGET_CLASS_ID:
                 continue
@@ -326,240 +289,186 @@ class RobotFollower(Node):
             area = float((x2 - x1) * (y2 - y1))
             if area > best_area:
                 best_area = area
-                best_box  = (x1, y1, x2, y2)
+                best_box  = (float(x1), float(y1), float(x2), float(y2))
         return best_box
 
     # ════════════════════════════════════════════════════════════════
-    # APRILTAG DETECTION
+    # CONTROL  — PID เดินหน้า/หมุน ตาม top_y เทียบกับ setpoint_y
+    #
+    # setpoint_y = H - bottom_margin  (ใกล้ขอบล่าง)
+    # ไกล  → top_y น้อย (สูงในภาพ) → error บวก → เดินหน้า
+    # ใกล้  → top_y มาก (ต่ำในภาพ) → error ≈ 0   → หยุด
+    # ════════════════════════════════════════════════════════════════
+    def compute_cmd(self, cx, top_y, cmd):
+        """
+        คืนค่า True ถ้าหยุดแล้ว (top_y ≥ setpoint_y)
+        """
+        error_y = self.setpoint_y - top_y   # บวก = ยังต้องเดินหน้า
+
+        is_stopped = error_y <= 0           # top_y ชนหรือผ่าน setpoint แล้ว
+
+        # ── angular (PID หมุน ตาม cx) ───────────────────────────────
+        pixel_error_x = cx - (self.W / 2.0)
+        deadband = self.angular_deadband_stopped if is_stopped else self.center_deadband
+        if abs(pixel_error_x) < deadband:
+            pixel_error_x = 0.0
+        heading       = -(pixel_error_x / (self.W / 2.0)) * (self.vfov_rad / 2.0)
+        cmd.angular.z = max(-self.max_angular, min(self.max_angular, heading))
+
+        # ── linear (proportional เดินหน้า) ──────────────────────────
+        if not is_stopped:
+            # proportional gain เบาๆ เมื่อใกล้ setpoint
+            ratio        = min(error_y / max(self.setpoint_y, 1.0), 1.0)
+            speed        = self.max_linear * max(ratio, 0.4)   # อย่างน้อย 40% speed
+            cmd.linear.x = speed
+        else:
+            cmd.linear.x = 0.0
+
+        return is_stopped
+
+    # ════════════════════════════════════════════════════════════════
+    # APRILTAG
     # ════════════════════════════════════════════════════════════════
     def apriltag_read_and_pub(self, frame):
-        undist = cv2.undistort(
-            frame, self.camera_matrix,
-            self.dist_coeffs, None, self.new_camera_matrix
-        )
+        undist = cv2.undistort(frame, self.camera_matrix, self.dist_coeffs,
+                               None, self.new_camera_matrix)
         gray = cv2.cvtColor(undist, cv2.COLOR_BGR2GRAY)
-
-        results = self.at_detector.detect(
-            gray,
-            estimate_tag_pose=True,
-            camera_params=self.camera_params,
-            tag_size=self.tag_size,
-        )
-        if not results:
+        try:
+            detections = self.at_detector.detect(
+                gray,
+                estimate_tag_pose=True,
+                camera_params=(self.fx, self.fy, self.cx_cam, self.cy_cam),
+                tag_size=self.tag_size,
+            )
+        except Exception as e:
+            self.get_logger().warn(f"AprilTag detect error: {e}")
+            return
+        if not detections:
             return
 
-        best  = min(results, key=lambda r: r.pose_t[2][0])
-        t     = best.pose_t
-        R     = best.pose_R
-        x_m   = float(t[0][0])
-        y_m   = float(t[1][0])
-        z_m   = float(t[2][0])
-        yaw_d = math.degrees(math.atan2(float(R[0][2]), float(R[2][2])))
-
+        best  = max(detections, key=lambda d: cv2.contourArea(d.corners.astype(int)))
+        tx, ty, tz = best.pose_t.flatten()
+        R_mat = best.pose_R
+        x_m   = float(tx); y_m = float(ty); z_m = float(tz)
+        yaw_d = math.degrees(math.atan2(float(R_mat[0, 2]), float(R_mat[2, 2])))
         tag_id = best.tag_id
-        ab     = tag_id // 1000
-        c      = (tag_id // 100) % 10
-        de     = tag_id % 100
+        ab = tag_id // 1000
+        c  = (tag_id // 100) % 10
+        de = tag_id % 100
 
         self.tag_read_count += 1
-        self.last_tag_data  = (ab, c, de, x_m, y_m, z_m, yaw_d)
-        self.last_tag_time  = self.get_clock().now()
+        self.last_tag_data   = (ab, c, de, x_m, y_m, z_m, yaw_d)
+        self.last_tag_time   = self.get_clock().now()
 
+        # วาด overlay
         corners = best.corners.astype(int)
         for i in range(4):
-            cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1)%4]), (255, 0, 255), 2)
+            cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1) % 4]),
+                     (255, 0, 255), 2)
         cv2.putText(frame,
-            f"TAG ID:{tag_id} z={z_m:.3f}m x={x_m:.3f}m yaw={yaw_d:.1f}deg "
+            f"TAG:{tag_id} z={z_m:.3f}m x={x_m:.3f}m "
             f"[{self.tag_read_count}/{TAG_READ_REQUIRED}]",
             (10, self.H - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
 
         if self.tag_read_count >= TAG_READ_REQUIRED and not self.tag_published:
-            msg_ab = Int32(); msg_ab.data = ab
-            msg_c  = Int32(); msg_c.data  = c
-            msg_de = Int32(); msg_de.data = de
-            self.plant_pub.publish(msg_ab)
-            self.gap_pub.publish(msg_c)
-            self.interval_pub.publish(msg_de)
-
+            self.plant_pub.publish(Int32(data=ab))
+            self.gap_pub.publish(Int32(data=c))
+            self.interval_pub.publish(Int32(data=de))
             pose_msg = Float32MultiArray()
-            pose_msg.data = [float(x_m), float(y_m), float(z_m), float(yaw_d)]
+            pose_msg.data = [x_m, y_m, z_m, yaw_d]
             self.pose_pub.publish(pose_msg)
-
             self.tag_published = True
             self.get_logger().info(
-                f"[AprilTag] Published → AB={ab}cm C={c} DE={de}cm | "
-                f"x={x_m:.3f}m z={z_m:.3f}m yaw={yaw_d:.1f}deg"
-            )
+                f"[AprilTag] AB={ab} C={c} DE={de} | z={z_m:.3f}m yaw={yaw_d:.1f}deg")
 
     # ════════════════════════════════════════════════════════════════
     # DRAWING
     # ════════════════════════════════════════════════════════════════
-    def draw_bbox(self, frame, x, y, w, h, cx, top_y):
-        cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0, 255, 0), 2)
-        cv2.circle(frame, (int(cx), int(top_y)), 5, (255, 128, 0), -1)
-        cv2.line(frame, (int(x), int(top_y)), (int(x+w), int(top_y)), (255, 128, 0), 2)
+    def draw_bbox(self, frame, cx, bot_y, w, h):
+        x = int(cx - w / 2); y = int(bot_y - h)   # y_top = bot_y - h
+        cv2.rectangle(frame, (x, y), (x + int(w), y + int(h)), (0, 255, 0), 2)
+        # จุดแดงที่ขอบล่าง
+        cv2.circle(frame, (int(cx), int(bot_y)), 6, (0, 0, 255), -1)
         cv2.putText(frame,
-            f"State: {STATE_NAME[self.state]} | Area: {int(w*h)}",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            f"{STATE_NAME[self.state]} | bot_y={int(bot_y)} | lost:{self.lost_count}",
+            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
     def draw_overlay(self, frame, cmd):
-        cv2.line(frame, (self.W//2, 0), (self.W//2, self.H), (255, 255, 0), 1)
+        # เส้นกลางภาพ (แนวตั้ง)
+        cv2.line(frame, (self.W // 2, 0), (self.W // 2, self.H), (255, 255, 0), 1)
 
-        target_pixel_y = int(
-            (self.H / 2.0) - self.target_v_angle * (self.H / 2.0) / (self.vfov_rad / 2.0)
-        )
-        dash_len = 20
-        for x_start in range(0, self.W, dash_len * 2):
-            x_end = min(x_start + dash_len, self.W)
-            cv2.line(frame, (x_start, target_pixel_y), (x_end, target_pixel_y), (0, 220, 255), 2)
-        cv2.putText(frame, f"TARGET y={target_pixel_y}px",
-            (5, target_pixel_y - 6),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 255), 2)
+        # ── เส้น setpoint (ขอบล่าง) ─────────────────────────────────
+        sp = int(self.setpoint_y)
+        # เส้นทึบสีแดงสด หนา 2px
+        cv2.line(frame, (0, sp), (self.W, sp), (0, 0, 255), 2)
+        # ป้ายกำกับ
+        cv2.putText(frame, f"STOP LINE y={sp}px",
+            (5, sp - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
+        # ── สถานะ TRACK ─────────────────────────────────────────────
         if self.state == STATE_TRACK and self.current_ref_y is not None:
-            pixel_error_y  = self.current_ref_y - (self.H / 2.0)
-            vertical_angle = -(pixel_error_y / (self.H / 2.0)) * (self.vfov_rad / 2.0)
-            angle_error    = self.target_v_angle - vertical_angle
-
-            if abs(angle_error) <= self.angle_deadband:
-                txt   = (f"STOPPED ({self.stopped_frame_count}/{self.min_stopped_frames}) "
-                         f"| track {self.track_frame_count}/{MIN_TRACK_FRAMES}")
+            error_y = self.setpoint_y - self.current_ref_y
+            if error_y <= 0:
+                txt   = f"STOPPED ({self.stopped_frame_count}/{self.min_stopped_frames})"
                 color = (0, 255, 0)
             else:
-                txt   = f"MOVING err={angle_error:.3f} | track={self.track_frame_count}"
+                txt   = f"MOVING err={error_y:.0f}px | track={self.track_frame_count}"
                 color = (0, 165, 255)
             cv2.putText(frame, txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
+        # ── สถานะ FINAL_APPROACH ────────────────────────────────────
+        if self.state == STATE_FINAL_APPROACH and self.last_tag_data:
+            z_m = self.last_tag_data[5]
+            cv2.putText(frame, f"FA z={z_m:.3f}m / stop={self.final_stop_dist}m",
+                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+
     # ════════════════════════════════════════════════════════════════
-    # FINAL APPROACH (sub-state machine)
-    #
-    #  FA_APPROACH  → เดินหน้าจนกว่า AprilTag z < final_stop_distance_m
-    #  FA_READ_TAG  → หยุด, รออ่าน AprilTag ให้ครบ TAG_READ_REQUIRED
-    #                 (หรือ timeout → ใช้ค่าล่าสุดที่มี)
-    #  FA_ADVANCE   → reset wheel, เดินหน้าต่อด้วยระยะ = z - advance_margin (เมตร → cm)
-    #  FA_DONE      → หยุดถาวร
+    # FINAL APPROACH
     # ════════════════════════════════════════════════════════════════
     def handle_final_approach(self, frame, cmd):
+        tag_z = self.last_tag_data[5] if self.last_tag_data else None
 
-        # อ่าน tag ทุก TAG_INTERVAL เฟรม (ทำใน update() แล้ว — ที่นี่แค่ดึงค่า)
-        tag_z = self.last_tag_data[5] if self.last_tag_data is not None else None
-
-        # ── FA_APPROACH ────────────────────────────────────────────
         if self.fa_sub_state == FA_APPROACH:
-
-            tag_timed_out = False
+            # ตรวจ timeout (safety: ไม่เห็น tag นานเกิน)
+            timed_out = False
             if self.last_tag_time is not None:
                 elapsed = (self.get_clock().now() - self.last_tag_time).nanoseconds / 1e9
-                if elapsed > self.final_tag_timeout:
-                    tag_timed_out = True
+                timed_out = elapsed > self.final_tag_timeout
 
-            if tag_timed_out:
-                # ไม่เห็น tag นานเกินไประหว่างเข้าหา → safety stop
-                cmd.linear.x  = 0.0
-                cmd.angular.z = 0.0
-                cv2.putText(frame, "FINAL APPROACH: TAG TIMEOUT - STOPPED",
-                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+            if timed_out:
+                cmd.linear.x = cmd.angular.z = 0.0
+                cv2.putText(frame, "FINAL: TAG TIMEOUT - STOPPED",
+                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+                self.get_logger().warn("[FINAL] Tag timeout → safety stop")
 
-            elif tag_z is None or tag_z > self.final_stop_dist:
-                # ยังไกล → เดินหน้า
+            elif tag_z is None:
+                # ยังไม่เห็น tag → เดินหน้าช้าๆ
                 cmd.linear.x  = self.final_speed
                 cmd.angular.z = 0.0
-                z_txt = f"{tag_z:.3f}m" if tag_z is not None else "N/A"
-                cv2.putText(frame, f"FINAL: approaching z={z_txt}",
-                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 2)
+                cv2.putText(frame, "FINAL: searching tag...",
+                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 150, 255), 2)
 
-            else:
-                # ถึง 30cm แล้ว → หยุด เริ่มอ่าน tag
-                cmd.linear.x  = 0.0
+            elif tag_z > self.final_stop_dist:
+                # ยังไกล → เดินหน้า (proportional)
+                ratio        = min((tag_z - self.final_stop_dist) / 0.5, 1.0)
+                speed        = self.final_speed * max(ratio, 0.5)
+                cmd.linear.x  = speed
                 cmd.angular.z = 0.0
-                self.fa_sub_state      = FA_READ_TAG
-                self.fa_read_tag_start = self.get_clock().now()
-                # reset counter เพื่ออ่านใหม่ตั้งแต่ต้น (ให้ได้ค่าที่ระยะนี้จริงๆ)
-                self.tag_read_count = 0
-                self.tag_published  = False
-                self.last_tag_data  = None
-                self.get_logger().info(
-                    f"[FINAL] Reached {self.final_stop_dist}m → reading AprilTag..."
-                )
-
-        # ── FA_READ_TAG ────────────────────────────────────────────
-        elif self.fa_sub_state == FA_READ_TAG:
-            cmd.linear.x  = 0.0
-            cmd.angular.z = 0.0
-
-            elapsed = (self.get_clock().now() - self.fa_read_tag_start).nanoseconds / 1e9
-            reads_ok = self.tag_read_count >= TAG_READ_REQUIRED
-            timed_out = elapsed > self.read_tag_timeout
-
-            if reads_ok or (timed_out and self.last_tag_data is not None):
-                # ได้ข้อมูล tag แล้ว → คำนวณระยะ advance
-                z_m = self.last_tag_data[5]
-                # เดินหน้าต่อ = ระยะ z (เมตร) - margin, แปลงเป็น cm
-                advance_m  = max(0.0, z_m - self.advance_margin)
-                advance_cm = advance_m * 100.0
-
-                self.get_logger().info(
-                    f"[FINAL] Tag z={z_m:.3f}m → advance {advance_cm:.1f}cm "
-                    f"(reads={self.tag_read_count}, elapsed={elapsed:.1f}s)"
-                )
-
-                # reset wheel ticks แล้วเริ่ม advance
-                self.reset_wheel_ticks()
-                self.fa_advance_target = advance_cm
-                self.fa_advance_start  = self.get_average_wheel_distance()
-                self.fa_sub_state      = FA_ADVANCE
-
-            elif timed_out and self.last_tag_data is None:
-                # timeout และไม่มีข้อมูล tag เลย → abort
-                self.get_logger().warn(
-                    f"[FINAL] Tag read timeout ({elapsed:.1f}s) - no data → DONE"
-                )
-                self.fa_sub_state        = FA_DONE
-                self.final_approach_done = True
-            else:
-                # กำลังรออ่าน tag
                 cv2.putText(frame,
-                    f"FINAL: reading tag {self.tag_read_count}/{TAG_READ_REQUIRED} "
-                    f"({elapsed:.1f}s/{self.read_tag_timeout:.0f}s)",
-                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2)
+                    f"FINAL: z={tag_z:.3f}m → {self.final_stop_dist:.2f}m spd={speed:.2f}",
+                    (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 100, 0), 2)
 
-        # ── FA_ADVANCE ─────────────────────────────────────────────
-        elif self.fa_sub_state == FA_ADVANCE:
-            current_dist = self.get_average_wheel_distance()
-            traveled     = current_dist - self.fa_advance_start
-            remain       = self.fa_advance_target - traveled
-
-            DECEL_ZONE = 10.0  # cm
-            SPEED_SLOW = 0.06  # m/s
-
-            if remain > DECEL_ZONE:
-                cmd.linear.x = self.advance_speed
-            elif remain > 0:
-                ratio        = remain / DECEL_ZONE
-                cmd.linear.x = max(SPEED_SLOW + (self.advance_speed - SPEED_SLOW) * ratio,
-                                   SPEED_SLOW)
             else:
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-                self.get_logger().info(
-                    f"[FINAL] Advance complete: traveled={traveled:.1f}cm / "
-                    f"target={self.fa_advance_target:.1f}cm"
-                )
+                # ถึงระยะแล้ว → หยุดรอ
+                cmd.linear.x = cmd.angular.z = 0.0
                 self.fa_sub_state        = FA_DONE
                 self.final_approach_done = True
+                self.get_logger().info(f"[FINAL] Done! z={tag_z:.3f}m ≤ {self.final_stop_dist}m")
 
-            cmd.angular.z = 0.0
-            cv2.putText(frame,
-                f"FINAL ADVANCE: {traveled:.1f}/{self.fa_advance_target:.1f}cm "
-                f"remain={remain:.1f}cm",
-                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
-
-        # ── FA_DONE ─────────────────────────────────────────────────
         elif self.fa_sub_state == FA_DONE:
-            cmd.linear.x  = 0.0
-            cmd.angular.z = 0.0
-            cv2.putText(frame, "FINAL: DONE",
-                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cmd.linear.x = cmd.angular.z = 0.0
+            cv2.putText(frame, f"FINAL: DONE (z={tag_z:.3f}m)" if tag_z else "FINAL: DONE",
+                (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
     # ════════════════════════════════════════════════════════════════
     # MAIN LOOP
@@ -572,7 +481,7 @@ class RobotFollower(Node):
         self.frame_count += 1
         cmd = Twist()
 
-        # อ่าน AprilTag ทุก TAG_INTERVAL เฟรม
+        # อ่าน AprilTag ทุก TAG_INTERVAL เฟรม (ทุก state)
         if self.frame_count % TAG_INTERVAL == 0:
             self.apriltag_read_and_pub(frame)
 
@@ -588,78 +497,55 @@ class RobotFollower(Node):
         elif self.state == STATE_TRACK:
             self.track_frame_count += 1
 
-            if self.track_frame_count % REDETECT_INTERVAL == 0:
+            # YOLO re-detect ทุก YOLO_INTERVAL เฟรม
+            if self.frame_count % YOLO_INTERVAL == 0:
                 box = self.detect_best(frame)
                 if box is not None:
-                    self.init_tracker(frame, box, full_reset=False)
-                    self.get_logger().info(
-                        f"Re-init tracker (track={self.track_frame_count})"
-                    )
-
-            ok, bbox = self.tracker.update(frame)
-
-            if ok:
-                x, y, w, h   = bbox
-                current_area = w * h
-
-                if self.prev_bbox_area is not None:
-                    ratio = current_area / self.prev_bbox_area
-                    if ratio > self.max_bbox_change or ratio < (1.0 / self.max_bbox_change):
-                        self.get_logger().warn(f"Box jump {ratio:.2f}x → lost")
-                        self.state   = STATE_LOST
-                        self.tracker = None
-                        self.stopped_frame_count = 0
-                    else:
-                        self.prev_bbox_area = current_area
-                        cx    = x + w / 2.0
-                        top_y = float(y)
-                        self.current_ref_y = top_y
-
-                        if self.prev_cx is not None and \
-                           abs(cx - self.prev_cx) > MAX_CENTER_JUMP:
-                            self.get_logger().warn("CX jump → lost")
-                            self.state   = STATE_LOST
-                            self.tracker = None
-                            self.stopped_frame_count = 0
-                        else:
-                            self.prev_cx    = cx
+                    x1, y1, x2, y2 = box
+                    new_cx   = (x1 + x2) / 2.0
+                    new_bot  = float(y2)           # ขอบล่าง
+                    new_area = (x2 - x1) * (y2 - y1)
+                    if self.smoother.valid:
+                        ratio = new_area / max(self.smoother.area, 1.0)
+                        if (1.0 / self.max_bbox_change) < ratio < self.max_bbox_change:
+                            self.smoother.update(new_cx, new_bot, new_area)
                             self.lost_count = 0
-                            self.compute_cmd(cx, top_y, cmd)
-                            self.draw_bbox(frame, x, y, w, h, cx, top_y)
-
-                            if abs(cmd.linear.x) < 0.01:
-                                self.stopped_frame_count += 1
-                            else:
-                                self.stopped_frame_count = 0
-
-                            # Trigger FINAL_APPROACH
-                            if self.track_frame_count >= MIN_TRACK_FRAMES and \
-                               self.stopped_frame_count >= self.min_stopped_frames:
-                                self.get_logger().info(
-                                    f'[TRIGGER] track={self.track_frame_count} '
-                                    f'stopped={self.stopped_frame_count} → FINAL_APPROACH'
-                                )
-                                self.tag_read_count      = 0
-                                self.tag_published       = False
-                                self.last_tag_time       = None
-                                self.final_approach_done = False
-                                self.fa_sub_state        = FA_APPROACH   # reset sub-state
-                                self.state               = STATE_FINAL_APPROACH
-                                self.stopped_frame_count = 0
+                        # else: bbox กระโดด → ignore เฟรมนี้
+                    else:
+                        self.smoother.update(new_cx, new_bot, new_area)
+                        self.lost_count = 0
                 else:
-                    self.prev_bbox_area = current_area
-                    cx    = x + w / 2.0
-                    top_y = float(y)
-                    self.current_ref_y = top_y
-                    self.prev_cx       = cx
-                    self.draw_bbox(frame, x, y, w, h, cx, top_y)
-            else:
-                self.lost_count += 1
-                self.stopped_frame_count = 0
-                if self.lost_count > MAX_LOST_FRAMES:
-                    self.get_logger().warn("Lost target")
-                    self.state   = STATE_LOST
-                    self.tracker = None
+                    self.lost_count += 1
+                    # หยุดทันทีถ้ามองไม่เห็น > 2 เฟรม
+                    if self.lost_count > 2:
+                        cmd.linear.x = cmd.angular.z = 0.0
+
+            if self.smoother.valid:
+                s_cx, s_top_y, s_area = self.smoother.values
+                s_h = math.sqrt(max(s_area, 1.0))   # ประมาณ h
+                s_w = s_h
+                self.current_ref_y = s_top_y
+
+                # compute cmd และตรวจว่าหยุดแล้วหรือยัง
+                is_stopped = self.compute_cmd(s_cx, s_top_y, cmd)
+                self.draw_bbox(frame, s_cx, s_top_y, s_w, s_h)
+
+                if is_stopped:
+                    self.stopped_frame_count += 1
+                else:
+                    self.stopped_frame_count = 0
+
+                # Trigger FINAL_APPROACH เมื่อ track ครบ MIN_TRACK_FRAMES
+                # และ stopped ครบ min_stopped_frames
+                if (self.track_frame_count >= MIN_TRACK_FRAMES and
+                        self.stopped_frame_count >= self.min_stopped_frames):
+                    self._enter_final_approach()
+
+            # Lost เกิน MAX_LOST_FRAMES → LOST
+            if self.lost_count > MAX_LOST_FRAMES:
+                self.get_logger().warn("Lost target → LOST")
+                cmd.linear.x = cmd.angular.z = 0.0
+                self.state = STATE_LOST
 
         # ════════════════════════════════════════════════════════════
         # LOST → SEARCH
@@ -672,17 +558,23 @@ class RobotFollower(Node):
         # ════════════════════════════════════════════════════════════
         # SEARCH / CONFIRM
         # ════════════════════════════════════════════════════════════
-        if self.state in [STATE_SEARCH, STATE_CONFIRM] and \
-           self.frame_count % YOLO_INTERVAL == 0:
+        if (self.state in [STATE_SEARCH, STATE_CONFIRM] and
+                self.frame_count % YOLO_INTERVAL == 0):
             box = self.detect_best(frame)
             if box is not None:
                 self.confirm_count += 1
                 if self.confirm_count >= LOCK_CONFIRM_FRAMES:
-                    self.init_tracker(frame, box, full_reset=True)
-                    self.tag_read_count = 0
-                    self.tag_published  = False
-                    self.state         = STATE_TRACK
-                    self.confirm_count = 0
+                    x1, y1, x2, y2 = box
+                    self.smoother.reset()
+                    self.smoother.update((x1 + x2) / 2.0, float(y2),  # ขอบล่าง
+                                         (x2 - x1) * (y2 - y1))
+                    self.tag_read_count      = 0
+                    self.tag_published       = False
+                    self.state               = STATE_TRACK
+                    self.confirm_count       = 0
+                    self.track_frame_count   = 0
+                    self.stopped_frame_count = 0
+                    self.lost_count          = 0
                     self.get_logger().info("Target locked → TRACK")
             else:
                 self.confirm_count = 0
@@ -690,13 +582,13 @@ class RobotFollower(Node):
                     self.state = STATE_SEARCH
 
         # ════════════════════════════════════════════════════════════
-        # Publish
+        # Draw & Publish
         # ════════════════════════════════════════════════════════════
         self.draw_overlay(frame, cmd)
 
+        # ป้องกัน cmd หลุดออกนอก TRACK / FINAL_APPROACH
         if self.state not in [STATE_TRACK, STATE_FINAL_APPROACH]:
-            cmd.linear.x  = 0.0
-            cmd.angular.z = 0.0
+            cmd.linear.x = cmd.angular.z = 0.0
 
         self.cmd_pub.publish(cmd)
 
@@ -709,13 +601,14 @@ class RobotFollower(Node):
             float(self.stopped_frame_count),
             float(self.track_frame_count),
             float(self.last_tag_data[5]) if self.last_tag_data else -1.0,
+            float(self.lost_count),
+            float(self.setpoint_y),   # debug: ดู setpoint ด้วย
         ]
         self.debug_pub.publish(debug)
 
         if self.get_parameter('publish_image').value:
             self.image_pub.publish(
-                self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-            )
+                self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
 
 
 def main(args=None):

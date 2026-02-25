@@ -86,8 +86,8 @@ def generate_launch_description():
     return LaunchDescription([
         # heading_pid_node,
         wheel_odometry_node,
-        ekf_node,
-        odom_to_path_node,
+        # ekf_node,
+        # odom_to_path_node,
         static_tf_imu,
         reset_manager_node,
     ])
