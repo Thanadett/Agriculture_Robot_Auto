@@ -1,9 +1,8 @@
-#!/home/t/yolo_env/bin/python
+#!/home/prukubt/yolo_env/bin/python
 
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Int32
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
@@ -11,86 +10,45 @@ import cv2
 from pupil_apriltags import Detector
 
 
-class AprilTagFollower(Node):
+class AprilTagCameraPublisher(Node):
 
     def __init__(self):
-        super().__init__('apriltag_follower')
+        super().__init__('apriltag_camera')
 
-        # =====================
-        # Parameters
-        # =====================
-        self.declare_parameter('camera_id', 4)
-        self.declare_parameter('image_width', 640)
-        self.declare_parameter('image_height', 480)
-        self.declare_parameter('publish_image', True)
+        # ---------------- Camera calibration ----------------
+        self.fx = 651.50492
+        self.fy = 650.39078
+        self.cx = 320.62708
+        self.cy = 236.91812
+        self.tag_size = 0.04
 
-        self.declare_parameter('tag_size', 0.070)
-
-        cam_id = self.get_parameter('camera_id').value
-        self.W = self.get_parameter('image_width').value
-        self.H = self.get_parameter('image_height').value
-        self.publish_image_flag = self.get_parameter('publish_image').value
-        self.TAG_SIZE = self.get_parameter('tag_size').value
-
-        # =====================
-        # Camera Calibration (approx)
-        # =====================
-        fx = 580
-        fy = 580
-        cx = self.W / 2.0
-        cy = self.H / 2.0
-        self.camera_params = (fx, fy, cx, cy)
-
-        # =====================
-        # Detector
-        # =====================
-        self.detector = Detector(
-            families="tagStandard52h13",
-            nthreads=4,
-            quad_decimate=1.0,
-            refine_edges=True
-        )
-
-        # =====================
-        # ROS Publishers
-        # =====================
-        self.plant_pub = self.create_publisher(Int32, '/apriltag/planting_distance', 10)
-        self.gap_pub = self.create_publisher(Int32, '/apriltag/gap_type', 10)
-        self.interval_pub = self.create_publisher(Int32, '/apriltag/cabbage_interval', 10)
-        self.image_pub = self.create_publisher(Image, '/vision/apriltag', 10)
-
+        # ---------------- Publisher ----------------
+        self.pub = self.create_publisher(Image, '/vision/image', 1)
         self.bridge = CvBridge()
 
-        # =====================
-        # Camera
-        # =====================
-        self.cap = cv2.VideoCapture(cam_id)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.W)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
+        # ---------------- Camera ----------------
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(3, 640)
+        self.cap.set(4, 480)
 
         if not self.cap.isOpened():
             self.get_logger().error("Cannot open camera")
             exit()
 
-        self.timer = self.create_timer(0.05, self.update)
+        # ---------------- AprilTag Detector ----------------
+        self.detector = Detector(
+            families="tagStandard52h13",
+            nthreads=1,
+            quad_decimate=2.0
+        )
 
-        self.get_logger().info("AprilTag follower started")
+        # Timer ~10 FPS
+        self.timer = self.create_timer(0.1, self.loop)
 
-    # =====================================================
-    # Decode ID → AB / C / DE
-    # =====================================================
-    def decode_id(self, tag_id):
+        self.get_logger().info("AprilTag Camera Publisher started")
 
-        AB = tag_id // 1000
-        C  = (tag_id // 100) % 10
-        DE = tag_id % 100
 
-        return AB, C, DE
-
-    # =====================================================
-    # MAIN LOOP
-    # =====================================================
-    def update(self):
+    def loop(self):
 
         ret, frame = self.cap.read()
         if not ret:
@@ -98,37 +56,21 @@ class AprilTagFollower(Node):
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        results = self.detector.detect(
+        tags = self.detector.detect(
             gray,
             estimate_tag_pose=True,
-            camera_params=self.camera_params,
-            tag_size=self.TAG_SIZE
+            camera_params=(self.fx, self.fy, self.cx, self.cy),
+            tag_size=self.tag_size
         )
 
-        for r in results:
-
-            tag_id = r.tag_id
-            AB, C, DE = self.decode_id(tag_id)
-
-            # Publish decoded values
-            plant_msg = Int32()
-            plant_msg.data = AB
-            self.plant_pub.publish(plant_msg)
-
-            gap_msg = Int32()
-            gap_msg.data = C
-            self.gap_pub.publish(gap_msg)
-
-            interval_msg = Int32()
-            interval_msg.data = DE
-            self.interval_pub.publish(interval_msg)
+        for tag in tags:
+            tx, ty, tz = tag.pose_t.flatten()
 
             self.get_logger().info(
-                f"ID:{tag_id} → AB:{AB}cm | C:{C} | DE:{DE}cm"
+                f"ID={tag.tag_id}  Z={tz:.3f}m"
             )
 
-            # Draw bounding box (for debug image topic)
-            corners = r.corners.astype(int)
+            corners = tag.corners.astype(int)
             for i in range(4):
                 cv2.line(frame,
                          tuple(corners[i]),
@@ -136,35 +78,23 @@ class AprilTagFollower(Node):
                          (0,255,0), 2)
 
             cv2.putText(frame,
-                        f"ID:{tag_id}",
-                        (int(r.center[0]), int(r.center[1])),
+                        f"ID {tag.tag_id} Z={tz:.2f}m",
+                        (corners[0][0], corners[0][1]-10),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0,0,255),
+                        0.6,
+                        (0,255,0),
                         2)
 
-        # =====================
-        # Publish image topic
-        # =====================
-        if self.publish_image_flag:
-            img_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-            self.image_pub.publish(img_msg)
+        # Publish image
+        msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.pub.publish(msg)
 
 
-# =====================================================
-# MAIN
-# =====================================================
 def main(args=None):
-
     rclpy.init(args=args)
-    node = AprilTagFollower()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-
-    node.cap.release()
+    node = AprilTagCameraPublisher()
+    rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
 

@@ -57,7 +57,7 @@ class RobotFollower(Node):
         self.declare_parameter('camera_id',    4)
         self.declare_parameter('image_width',  640)
         self.declare_parameter('image_height', 480)
-        self.declare_parameter('model_path',   '/home/t/392_project/ros2_ws/best.pt')
+        self.declare_parameter('model_path',   '/home/prukubt/392_Agri/ros2_ws/best.pt')
         self.declare_parameter('conf',         0.5)
 
         self.declare_parameter('max_linear',   0.4)

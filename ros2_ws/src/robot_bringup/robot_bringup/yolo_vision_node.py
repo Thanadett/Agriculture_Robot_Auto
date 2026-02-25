@@ -1,4 +1,19 @@
 #!/home/prukubt/yolo_env/bin/python
+<<<<<<< HEAD
+=======
+"""
+robot_follower_v5.py
+Flow:
+  SEARCH/CONFIRM → TRACK → FINAL_APPROACH → DONE
+
+TRACK   : เดินหน้าด้วย PID จนขอบบนของ object (top_y) ชนแถบล่างของภาพ
+          (top_y >= H - BOTTOM_MARGIN_PX)
+
+FINAL_APPROACH:
+  - FA_APPROACH : ค่อยๆ เดินเข้าหา tag จนกว่า z < final_stop_distance_m
+  - FA_DONE     : หยุดรอ state ถัดไป (publish pose แล้ว)
+"""
+>>>>>>> 0679da0d540b5f3a0449936120481e41113f603c
 
 import rclpy
 from rclpy.node import Node
@@ -93,8 +108,13 @@ class RobotFollower(Node):
         self.declare_parameter('image_height', 480)
         self.declare_parameter('model_path',   '/home/prukubt/392_Agri/ros2_ws/best.pt')
         self.declare_parameter('conf',         0.5)
+<<<<<<< HEAD
         self.declare_parameter('max_linear',   0.2)
         self.declare_parameter('max_angular',  0.4)
+=======
+        self.declare_parameter('max_linear',   0.4)
+        self.declare_parameter('max_angular',  0.6)
+>>>>>>> 0679da0d540b5f3a0449936120481e41113f603c
         self.declare_parameter('camera_vertical_fov_deg',         45.0)
         self.declare_parameter('center_deadband_px',               12)
         self.declare_parameter('angle_deadband_rad',               0.03)
@@ -105,7 +125,11 @@ class RobotFollower(Node):
         self.declare_parameter('min_stopped_frames',  3)
 
         # Final approach (AprilTag)
+<<<<<<< HEAD
         self.declare_parameter('final_stop_distance_m', 0.20)  # หยุดเมื่อ z < 20 cm
+=======
+        self.declare_parameter('final_stop_distance_m', 0.40)  # หยุดเมื่อ z < cm 
+>>>>>>> 0679da0d540b5f3a0449936120481e41113f603c
         self.declare_parameter('final_forward_speed',   0.10)  # ความเร็ว final approach
         self.declare_parameter('final_tag_timeout_sec', 3.0)   # safety stop ถ้าไม่เห็น tag
 
@@ -178,7 +202,11 @@ class RobotFollower(Node):
         self.at_detector = Detector(
             families="tagStandard52h13",
             nthreads=2,
+<<<<<<< HEAD
             quad_decimate=4.5,
+=======
+            quad_decimate=1.5,
+>>>>>>> 0679da0d540b5f3a0449936120481e41113f603c
             refine_edges=1,
         )
 
