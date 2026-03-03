@@ -3,17 +3,15 @@
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-
 import cv2
+import numpy as np
 from pupil_apriltags import Detector
 
 
-class AprilTagCameraPublisher(Node):
+class AprilTagCamera(Node):
 
     def __init__(self):
-        super().__init__('apriltag_camera')
+        super().__init__('apriltag_camera_debug')
 
         # ---------------- Camera calibration ----------------
         self.fx = 651.50492
@@ -21,10 +19,6 @@ class AprilTagCameraPublisher(Node):
         self.cx = 320.62708
         self.cy = 236.91812
         self.tag_size = 0.04
-
-        # ---------------- Publisher ----------------
-        self.pub = self.create_publisher(Image, '/vision/image', 1)
-        self.bridge = CvBridge()
 
         # ---------------- Camera ----------------
         self.cap = cv2.VideoCapture(0)
@@ -39,13 +33,13 @@ class AprilTagCameraPublisher(Node):
         self.detector = Detector(
             families="tagStandard52h13",
             nthreads=1,
-            quad_decimate=2.0
+            quad_decimate=1.0,      # เสถียรกว่า
+            refine_edges=True
         )
 
-        # Timer ~10 FPS
-        self.timer = self.create_timer(0.1, self.loop)
+        self.timer = self.create_timer(0.03, self.loop)
 
-        self.get_logger().info("AprilTag Camera Publisher started")
+        self.get_logger().info("AprilTag X11 Debug started")
 
 
     def loop(self):
@@ -64,39 +58,79 @@ class AprilTagCameraPublisher(Node):
         )
 
         for tag in tags:
+
             tx, ty, tz = tag.pose_t.flatten()
+            R = tag.pose_R
+
+            # ===============================
+            # 1️⃣  Parallel angle (ถูกต้อง)
+            # ===============================
+
+            normal = R[:, 2]                 # แกน Z ของ tag
+            camera_forward = np.array([0,0,1])
+
+            cos_angle = np.dot(normal, camera_forward)
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)
+
+            parallel_error = np.degrees(np.arccos(cos_angle))
+
+            # ===============================
+            # 2️⃣  Lateral error สำหรับหมุน
+            # ===============================
+
+            lateral_error = tx      # ซ้ายขวา
+            distance = tz           # ระยะตรงเข้า
 
             self.get_logger().info(
-                f"ID={tag.tag_id}  Z={tz:.3f}m"
+                f"ID={tag.tag_id} "
+                f"Z={distance:.3f}m "
+                f"tx={lateral_error:.3f}m "
+                f"parallel_err={parallel_error:.2f}°"
             )
 
+            # ---------------- Draw box ----------------
             corners = tag.corners.astype(int)
+
             for i in range(4):
                 cv2.line(frame,
                          tuple(corners[i]),
                          tuple(corners[(i+1)%4]),
                          (0,255,0), 2)
 
+            # ---------------- Draw info ----------------
             cv2.putText(frame,
-                        f"ID {tag.tag_id} Z={tz:.2f}m",
-                        (corners[0][0], corners[0][1]-10),
+                        f"Z={distance:.2f}m",
+                        (corners[0][0], corners[0][1]-40),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
-                        (0,255,0),
-                        2)
+                        (0,255,0), 2)
 
-        # Publish image
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.pub.publish(msg)
+            cv2.putText(frame,
+                        f"tx={lateral_error:.2f}m",
+                        (corners[0][0], corners[0][1]-20),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0,255,0), 2)
+
+            cv2.putText(frame,
+                        f"parallel={parallel_error:.1f}deg",
+                        (corners[0][0], corners[0][1]),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0,255,0), 2)
+
+        cv2.imshow("AprilTag Debug", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            rclpy.shutdown()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AprilTagCameraPublisher()
+    node = AprilTagCamera()
     rclpy.spin(node)
     node.destroy_node()
-    rclpy.shutdown()
+    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':

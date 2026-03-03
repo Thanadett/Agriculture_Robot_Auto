@@ -103,9 +103,11 @@ class RobotFollower(Node):
         self.declare_parameter('ema_alpha',                        EMA_ALPHA)
         self.declare_parameter('bottom_margin_px',    BOTTOM_MARGIN_PX)  # pixel buffer ขอบล่าง
         self.declare_parameter('min_stopped_frames',  3)
+        self.declare_parameter('use_x11_debug', False)
+        self.use_x11_debug = self.get_parameter('use_x11_debug').value
 
         # Final approach (AprilTag)
-        self.declare_parameter('final_stop_distance_m', 0.20)  # หยุดเมื่อ z < 20 cm
+        self.declare_parameter('final_stop_distance_m', 0.2)  # หยุดเมื่อ z < 20 cm
         self.declare_parameter('final_forward_speed',   0.10)  # ความเร็ว final approach
         self.declare_parameter('final_tag_timeout_sec', 3.0)   # safety stop ถ้าไม่เห็น tag
 
@@ -569,6 +571,11 @@ class RobotFollower(Node):
                 if self.state == STATE_CONFIRM:
                     self.state = STATE_SEARCH
 
+        # ── X11 Debug Window ───────────────────────
+        if self.use_x11_debug:
+            cv2.imshow("RobotFollower Debug", frame)
+            cv2.waitKey(1)
+
         # ════════════════════════════════════════════════════════════
         # Draw & Publish
         # ════════════════════════════════════════════════════════════
@@ -597,7 +604,7 @@ class RobotFollower(Node):
         if self.get_parameter('publish_image').value:
             self.image_pub.publish(
                 self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
-
+        
 
 def main(args=None):
     rclpy.init(args=args)
@@ -607,6 +614,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     node.cap.release()
+    cv2.destroyAllWindows()
     node.destroy_node()
     rclpy.shutdown()
 
