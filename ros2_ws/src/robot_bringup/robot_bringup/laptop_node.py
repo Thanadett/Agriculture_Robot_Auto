@@ -1,17 +1,32 @@
-#!/home/prukubt/yolo_env/bin/python
+#!/usr/bin/env python3
 """
-AprilTag Visual Servo — ROS2
+Laptop AprilTag Visual Servo — ROS2  (with YOLO guard)
 ============================================================
+รับภาพจาก Pi ผ่าน /camera/image_raw/compressed
+ประมวลผล AprilTag + YOLO guard บน Laptop แล้วส่ง cmd_vel กลับ Pi
+
+YOLO Guard Logic:
+  • รัน YOLO ทุก YOLO_EVERY=10 เฟรม เพื่อหา bounding box ของ object ที่ tag ติดอยู่
+  • AprilTag จะ "trusted" เฉพาะเมื่อ tag corners อยู่ภายใน YOLO bbox ± YOLO_MARGIN pixels
+  • ป้องกัน tag ผิดด้านหรือ tag ไกลๆ รบกวนระบบ
+  • ถ้า YOLO ไม่เจอ object → ใช้ YOLO bbox เดิม (stale) ได้นาน YOLO_STALE_MAX frames
+    หลังจากนั้น → ไม่ trust AprilTag จนกว่า YOLO จะ detect ใหม่
+
+Topics subscribed:
+  /camera/image_raw/compressed  (sensor_msgs/CompressedImage)
+
+Topics published:
+  /cmd_vel_pid                  (geometry_msgs/Twist)
+  /vision_debug                 (std_msgs/Float32MultiArray)
+  /apriltag/planting_distance   (std_msgs/Int32)
+  /apriltag/gap_type            (std_msgs/Int32)
+  /apriltag/cabbage_interval    (std_msgs/Int32)
+  /apriltag/pose                (std_msgs/Float32MultiArray)
+
 Control law (symmetric left/right):
   bearing = atan2(x, z)          # positive = tag is RIGHT
   angular.z = -Kp * bearing      # negative ω turns robot RIGHT  ✓
   angular.z = -Kp * yaw          # same sign convention for yaw align
-
-Three-phase approach:
-  APPROACH (z > Z_ALIGN)  : bearing PID → curve toward tag
-  ALIGN    (z > Z_FORWARD): yaw PID     → rotate until parallel
-  FORWARD  (z > Z_STOP)   : drive straight in with x correction
-  DONE     (z ≤ Z_STOP)   : stop
 """
 
 import math
@@ -20,6 +35,7 @@ import collections
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Float32MultiArray, Int32
 from cv_bridge import CvBridge
 
@@ -27,17 +43,25 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
+# YOLO (ultralytics)
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("[WARN] ultralytics not installed — YOLO guard disabled")
+
 
 # ════════════════════════════════════════════════════════════════
 # States
 # ════════════════════════════════════════════════════════════════
-STATE_SEARCH    = 0   # spin until tag found
-STATE_APPROACH  = 1   # z > Z_ALIGN  : bearing PID — curve in
-STATE_ALIGN     = 2   # z > Z_FORWARD: yaw PID     — go parallel
-STATE_FORWARD   = 3   # z > Z_STOP   : drive straight
-STATE_DONE      = 4   # z ≤ Z_STOP   : stop
-STATE_SCAN_BACK = 5   # tag lost: reverse-spin to recover
-STATE_REVERSE   = 6   # stuck: back up
+STATE_SEARCH    = 0
+STATE_APPROACH  = 1
+STATE_ALIGN     = 2
+STATE_FORWARD   = 3
+STATE_DONE      = 4
+STATE_SCAN_BACK = 5
+STATE_REVERSE   = 6
 
 STATE_NAME = {
     STATE_SEARCH:    "SEARCH",
@@ -64,63 +88,66 @@ STATE_COLOR = {
 # ════════════════════════════════════════════════════════════════
 
 # Distance zones (metres)
-Z_ALIGN   = 0.58   # switch APPROACH → ALIGN
-Z_FORWARD = 0.40   # switch ALIGN    → FORWARD
-Z_STOP    = 0.25   # switch FORWARD  → DONE
+Z_ALIGN   = 0.58
+Z_FORWARD = 0.40
+Z_STOP    = 0.25
 
 # ── APPROACH: bearing PID ────────────────────────────────────────
-# error  = bearing = atan2(x, z)   range [-π, π]
-# output = angular.z               (negated: positive bearing → turn right)
-APPROACH_KP = 1.00
-APPROACH_KI = 0.00
-APPROACH_KD = 0.20
-APPROACH_W_MAX  = 0.30   # rad/s — max angular speed
-APPROACH_V_BASE = 0.18   # m/s  — nominal forward speed
-APPROACH_V_MIN  = 0.04   # m/s  — floor (keep moving)
+APPROACH_KP     = 1.00
+APPROACH_KI     = 0.00
+APPROACH_KD     = 0.20
+APPROACH_W_MAX  = 0.30
+APPROACH_V_BASE = 0.18
+APPROACH_V_MIN  = 0.04
 
 # ── ALIGN: yaw PID ───────────────────────────────────────────────
-# error  = tag_normal_yaw          0 = parallel
-# output = angular.z               (negated: positive yaw → turn right)
-ALIGN_KP = 0.80
-ALIGN_KI = 0.00
-ALIGN_KD = 0.25
-ALIGN_W_MAX    = 0.30    # rad/s
-ALIGN_V        = 0.08    # m/s — slow creep while aligning
-ALIGN_YAW_DEAD = math.radians(2.5)  # ±2.5° deadband (matches real measurement)
+ALIGN_KP       = 0.80
+ALIGN_KI       = 0.00
+ALIGN_KD       = 0.25
+ALIGN_W_MAX    = 0.30
+ALIGN_V        = 0.08
+ALIGN_YAW_DEAD = math.radians(2.5)
 
-# ── Dock geometry (measured from robot's camera frame) ───────────
-# These are the expected tag pose values when robot is properly
-# parallel and centred relative to the planting row.
-# Measured from image: x≈0.046m, bearing≈7.2°, yaw≈±2.5°
-DOCK_X       = 0.046               # m   — tag lateral offset from robot centreline
-DOCK_BEARING = math.radians(7.2)   # rad — expected bearing when aligned
-DOCK_YAW_TOL = math.radians(2.5)   # rad — yaw tolerance (same as deadband)
+DOCK_X       = 0.046
+DOCK_BEARING = math.radians(7.2)
+DOCK_YAW_TOL = math.radians(2.5)
 
-# ── FORWARD: drive straight, no lateral correction ───────────────
-FORWARD_V = 0.10    # m/s
+# ── FORWARD ───────────────────────────────────────────────────────
+FORWARD_V = 0.10
 
 # ── SEARCH ───────────────────────────────────────────────────────
-SEARCH_W = 0.20          # rad/s — spin speed
+SEARCH_W = 0.20
 
 # ── SCAN_BACK ────────────────────────────────────────────────────
-SCAN_BACK_W       = 0.18   # rad/s
-SCAN_BACK_MAX_DEG = 90.0   # max rotation before → SEARCH
-SCAN_BACK_TIMEOUT = 10.0   # s
+SCAN_BACK_W       = 0.18
+SCAN_BACK_MAX_DEG = 90.0
+SCAN_BACK_TIMEOUT = 10.0
 
 # ── REVERSE ──────────────────────────────────────────────────────
-REVERSE_V    = -0.15   # m/s
-REVERSE_T    = 2.0     # s
+REVERSE_V = -0.15
+REVERSE_T = 2.0
 
 # ── Stuck detection ───────────────────────────────────────────────
-STUCK_SEC   = 3.0     # check interval
-STUCK_DELTA = 0.03    # must close by this much per interval
-STUCK_ZONE  = 1.50    # m — only check when closer than this
+STUCK_SEC   = 3.0
+STUCK_DELTA = 0.03
+STUCK_ZONE  = 1.50
 
 # ── Detection ────────────────────────────────────────────────────
-DETECT_EVERY    = 1    # run detector every N frames
-STABLE_REQUIRED = 4    # stable frames before trusting
-LOST_TIMEOUT    = 4.0  # s before switching to SCAN_BACK
-MISS_GRACE      = 5    # allowed consecutive misses before stable_count resets
+DETECT_EVERY    = 1
+STABLE_REQUIRED = 4
+LOST_TIMEOUT    = 4.0
+MISS_GRACE      = 5
+
+# ── YOLO Guard ───────────────────────────────────────────────────
+YOLO_EVERY      = 10      # รัน YOLO ทุก N เฟรม
+YOLO_CONF       = 0.40    # confidence threshold
+YOLO_MARGIN     = 30      # pixel margin สำหรับ x-range และ top-edge tolerance
+YOLO_TOP_BAND_RATIO = 0.35  # สัดส่วนความสูง bbox ที่ถือว่า "ด้านบน"
+                             # 0.35 = อนุญาต tag ใน 35% บนสุดของ YOLO bbox
+                             # ปรับขึ้นถ้า tag ติดต่ำกว่านี้, ลดถ้าต้องการเข้มขึ้น
+YOLO_STALE_MAX  = 30      # เฟรมที่ยอมให้ใช้ YOLO bbox เก่าก่อนจะหมดอายุ
+YOLO_CLASS_NAME = None    # None = ใช้ detection แรกที่ confidence สูงสุด
+                          # หรือระบุชื่อ class เช่น "apriltag_board"
 
 # ════════════════════════════════════════════════════════════════
 # X11 window layout
@@ -128,36 +155,31 @@ MISS_GRACE      = 5    # allowed consecutive misses before stable_count resets
 WIN_W, WIN_H = 1200, 660
 HIST_N       = 300
 
-# Camera preview (top-left)
 CAM_W, CAM_H = 480, 360
-
-# Top-view map (top-centre)
 MAP_W, MAP_H = 280, 360
-MAP_SCALE    = 100        # pixels per metre
+MAP_SCALE    = 100
 MAP_CX       = MAP_W // 2
 MAP_CY       = MAP_H - 30
 
-# Right panel: strip charts + PID breakdown
-CHART_X = CAM_W + MAP_W  # left edge of chart panel
+CHART_X = CAM_W + MAP_W
 CHART_W = WIN_W - CHART_X
 
-# Info bar below camera + map
-INFO_Y = CAM_H              # top of info bar
+INFO_Y = CAM_H
 INFO_H = WIN_H - CAM_H
 
-X11_SKIP = 2   # render every N frames
+X11_SKIP = 2
+
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
 # ════════════════════════════════════════════════════════════════
-# PID controller with component logging
+# PID controller
 # ════════════════════════════════════════════════════════════════
 class PID:
     def __init__(self, kp, ki, kd, lo=-1.0, hi=1.0):
         self.kp = kp; self.ki = ki; self.kd = kd
         self.lo = lo; self.hi = hi
-        self._int   = 0.0
-        self._prev  = 0.0
-        # last-cycle diagnostics
+        self._int = 0.0; self._prev = 0.0
         self.err = self.p = self.i = self.d = self.out = 0.0
 
     def reset(self):
@@ -165,9 +187,9 @@ class PID:
         self.err = self.p = self.i = self.d = self.out = 0.0
 
     def update(self, error, dt=0.05):
-        self._int  += error * dt
-        deriv       = (error - self._prev) / max(dt, 1e-6)
-        self._prev  = error
+        self._int += error * dt
+        deriv      = (error - self._prev) / max(dt, 1e-6)
+        self._prev = error
         p   = self.kp * error
         i   = self.ki * self._int
         d   = self.kd * deriv
@@ -177,19 +199,14 @@ class PID:
 
 
 # ════════════════════════════════════════════════════════════════
-# Tag pose smoother (median + EMA)
+# Tag smoother
 # ════════════════════════════════════════════════════════════════
 class TagSmoother:
-    """
-    Stores (x, z, tag_yaw) with median pre-filter then EMA.
-    bearing is NOT stored — it is always recomputed from (x, z).
-    """
     def __init__(self, alpha=0.55, window=3):
-        self.alpha  = alpha
-        self.window = window
-        self._xb  = collections.deque(maxlen=window)
-        self._zb  = collections.deque(maxlen=window)
-        self._yb  = collections.deque(maxlen=window)
+        self.alpha = alpha; self.window = window
+        self._xb = collections.deque(maxlen=window)
+        self._zb = collections.deque(maxlen=window)
+        self._yb = collections.deque(maxlen=window)
         self.x = self.z = self.yaw = None
 
     def push(self, x, z, yaw):
@@ -211,7 +228,6 @@ class TagSmoother:
 
     @property
     def bearing(self):
-        """bearing = atan2(x, z)  — always recomputed from current smoothed pose."""
         if self.x is None:
             return 0.0
         return math.atan2(self.x, max(self.z, 0.05))
@@ -222,7 +238,7 @@ class TagSmoother:
 
 
 # ════════════════════════════════════════════════════════════════
-# Ring buffer for strip charts
+# Ring buffer
 # ════════════════════════════════════════════════════════════════
 class Ring:
     def __init__(self, n, v=0.0):
@@ -234,34 +250,203 @@ class Ring:
 
 
 # ════════════════════════════════════════════════════════════════
-# X11 drawing primitives
+# YOLO Guard
 # ════════════════════════════════════════════════════════════════
-_FONT = cv2.FONT_HERSHEY_SIMPLEX
+class YOLOGuard:
+    """
+    ใช้ YOLO detect bounding box ของ object ที่ AprilTag ติดอยู่
+    AprilTag จะ trusted เฉพาะเมื่อ tag อยู่บริเวณ "ขอบบน" ของ YOLO bbox
+
+    เงื่อนไข is_tag_valid (AND ทั้งสอง):
+      1. x-range  : corners ทุกจุดอยู่ใน [x1-margin, x2+margin]
+      2. top-edge : centroid-y ของ tag อยู่ใน [y1-margin, y1+top_band]
+                    โดย top_band = bbox_height * TOP_BAND_RATIO
+                    (ค่า default 0.35 = อนุญาต tag ในช่วง 35% บนสุดของ bbox)
+
+    วิธีนี้ป้องกัน tag ผิดด้านซึ่งมักอยู่ต่ำกว่ากึ่งกลาง bbox
+
+    State:
+      bbox        : (x1, y1, x2, y2) หรือ None
+      bbox_age    : จำนวนเฟรมนับจาก YOLO detect ล่าสุด
+      yolo_ok     : bool — มี valid bbox อยู่หรือเปล่า
+    """
+
+    def __init__(self, model_path: str, conf: float = YOLO_CONF,
+                 margin: int = YOLO_MARGIN,
+                 stale_max: int = YOLO_STALE_MAX,
+                 class_name: str | None = YOLO_CLASS_NAME,
+                 top_band_ratio: float = YOLO_TOP_BAND_RATIO):
+        self.conf           = conf
+        self.margin         = margin
+        self.stale_max      = stale_max
+        self.class_name     = class_name
+        self.top_band_ratio = top_band_ratio   # สัดส่วนความสูง bbox ที่ถือว่า "ด้านบน"
+
+        self.bbox      = None   # (x1, y1, x2, y2)
+        self.bbox_age  = 0
+        self.yolo_ok   = False
+        self.disabled  = False
+
+        if not YOLO_AVAILABLE:
+            print("[YOLOGuard] ultralytics unavailable — guard disabled")
+            self.disabled = True
+            return
+
+        try:
+            self.model = YOLO(model_path)
+            print(f"[YOLOGuard] loaded model: {model_path}")
+        except Exception as e:
+            print(f"[YOLOGuard] model load failed: {e} — guard disabled")
+            self.disabled = True
+
+    def update(self, frame: np.ndarray) -> tuple | None:
+        """
+        รัน YOLO บน frame ปัจจุบัน
+        return: (x1, y1, x2, y2) ของ best detection หรือ None
+        """
+        if self.disabled:
+            return None
+
+        results = self.model(frame, conf=self.conf, verbose=False)
+        best_box  = None
+        best_conf = 0.0
+
+        for r in results:
+            for box in r.boxes:
+                cls_id = int(box.cls[0])
+                conf   = float(box.conf[0])
+
+                # กรอง class ถ้าระบุ class_name
+                if self.class_name is not None:
+                    cls_name = self.model.names.get(cls_id, '')
+                    if cls_name != self.class_name:
+                        continue
+
+                if conf > best_conf:
+                    best_conf = conf
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    best_box = (int(x1), int(y1), int(x2), int(y2))
+
+        if best_box is not None:
+            self.bbox     = best_box
+            self.bbox_age = 0
+            self.yolo_ok  = True
+        else:
+            self.bbox_age += 1
+            if self.bbox_age > self.stale_max:
+                self.bbox    = None
+                self.yolo_ok = False
+
+        return self.bbox
+
+    def tick(self):
+        """เรียกทุกเฟรมที่ไม่ได้รัน YOLO เพื่อนับ age"""
+        if self.disabled:
+            return
+        self.bbox_age += 1
+        if self.bbox_age > self.stale_max:
+            self.bbox    = None
+            self.yolo_ok = False
+
+    def is_tag_valid(self, corners: np.ndarray) -> tuple[bool, dict]:
+        """
+        ตรวจสอบว่า AprilTag อยู่บริเวณ "ขอบบน" ของ YOLO bbox
+
+        corners: shape (4, 2) — pixel coordinates ของมุม tag (x, y)
+        return : (valid: bool, info: dict)
+                 info มี key: centroid_y, top_y, band_bottom, reason
+
+        เงื่อนไข (AND ทั้งสอง):
+          1. x-range  : corners ทุกจุดอยู่ใน [x1-m, x2+m]
+          2. top-edge : tag centroid-y อยู่ใน [y1-m, y1 + bbox_height * top_band_ratio + m]
+                        → ยอมรับเฉพาะ tag ที่ centroid อยู่ใน band บนสุดของ bbox
+        """
+        info = {'centroid_y': 0, 'top_y': 0, 'band_bottom': 0, 'reason': ''}
+
+        if self.disabled:
+            info['reason'] = 'guard_disabled'
+            return True, info
+
+        if self.bbox is None:
+            info['reason'] = 'no_bbox'
+            return False, info
+
+        x1, y1, x2, y2 = self.bbox
+        m            = self.margin
+        bbox_height  = max(y2 - y1, 1)
+
+        # ── เงื่อนไข 1: x-range ─────────────────────────────────
+        for cx, cy in corners:
+            if not (x1 - m <= cx <= x2 + m):
+                info['reason'] = f'x_out cx={cx} range=[{x1-m},{x2+m}]'
+                return False, info
+
+        # ── เงื่อนไข 2: top-edge (centroid) ────────────────────
+        centroid_y  = float(np.mean(corners[:, 1]))   # mean Y ของ 4 corners
+        band_bottom = y1 + bbox_height * self.top_band_ratio  # เส้นล่างของ "zone บน"
+
+        info['centroid_y']  = centroid_y
+        info['top_y']       = y1
+        info['band_bottom'] = band_bottom
+
+        if not (y1 - m <= centroid_y <= band_bottom + m):
+            info['reason'] = (
+                f'not_top_edge cy={centroid_y:.0f} '
+                f'zone=[{y1-m:.0f},{band_bottom+m:.0f}]'
+            )
+            return False, info
+
+        info['reason'] = 'ok'
+        return True, info
+
+    def draw(self, frame: np.ndarray, color=(0, 180, 255)):
+        """วาด YOLO bbox + top-band zone บน frame"""
+        if self.bbox is None:
+            return
+        x1, y1, x2, y2 = self.bbox
+        col = color if self.yolo_ok else (80, 80, 80)
+
+        # วาด bbox ปกติ
+        cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
+        cv2.putText(frame, f"YOLO age={self.bbox_age}",
+                    (x1, y1 - 6), _FONT, 0.35, col, 1)
+
+        # วาด top-band zone (พื้นที่สีเขียวอ่อนโปร่งแสง)
+        bbox_height = max(y2 - y1, 1)
+        band_bottom = int(y1 + bbox_height * self.top_band_ratio)
+        band_bottom = min(band_bottom, y2)
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, band_bottom), (0, 255, 120), -1)
+        cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+
+        # เส้นขอบล่างของ top-band
+        cv2.line(frame, (x1, band_bottom), (x2, band_bottom), (0, 220, 80), 1)
+        cv2.putText(frame, f"top {int(self.top_band_ratio*100)}%",
+                    (x1 + 2, band_bottom - 3), _FONT, 0.30, (0, 220, 80), 1)
 
 
+# ════════════════════════════════════════════════════════════════
+# Drawing helpers
+# ════════════════════════════════════════════════════════════════
 def _txt(canvas, text, pos, scale, color, thick=1):
     cv2.putText(canvas, text, pos, _FONT, scale, (0, 0, 0), thick + 3)
     cv2.putText(canvas, text, pos, _FONT, scale, color,     thick)
 
 
 def draw_strip(canvas, x, y, w, h, ring, label, lo, hi, color):
-    """One strip chart with value label and zero-line."""
     cv2.rectangle(canvas, (x, y), (x + w, y + h), (20, 20, 20), -1)
     cv2.rectangle(canvas, (x, y), (x + w, y + h), (50, 50, 50),  1)
-
     span = float(hi - lo) or 1.0
     if lo < 0 < hi:
         zy = y + h - int(-lo / span * h)
         cv2.line(canvas, (x, zy), (x + w, zy), (55, 55, 55), 1)
-
-    data = ring.arr()
-    n    = len(data)
-    pts  = [(x + int(i / max(n - 1, 1) * (w - 1)),
-             y + h - int(np.clip((v - lo) / span, 0, 1) * (h - 2)))
-            for i, v in enumerate(data)]
+    data = ring.arr(); n = len(data)
+    pts = [(x + int(i / max(n - 1, 1) * (w - 1)),
+            y + h - int(np.clip((v - lo) / span, 0, 1) * (h - 2)))
+           for i, v in enumerate(data)]
     for i in range(1, len(pts)):
         cv2.line(canvas, pts[i - 1], pts[i], color, 1)
-
     val = ring.last()
     _txt(canvas, f"{label}:{val:+.3f}", (x + 4, y + 13), 0.33, color)
     cv2.putText(canvas, f"[{lo:.2f},{hi:.2f}]",
@@ -269,88 +454,62 @@ def draw_strip(canvas, x, y, w, h, ring, label, lo, hi, color):
 
 
 def draw_pid_panel(canvas, x, y, w, h, pid, title):
-    """
-    PID breakdown panel showing:
-      • history strips for P, D
-      • bar for current P / I / D / out
-    """
     cv2.rectangle(canvas, (x, y), (x + w, y + h), (15, 15, 15), -1)
     cv2.rectangle(canvas, (x, y), (x + w, y + h), (55, 55, 55),  1)
     _txt(canvas, title, (x + 4, y + 14), 0.36, (200, 200, 200))
-
     components = [
         ("P", pid.p,   (0, 210, 255)),
         ("I", pid.i,   (80, 255, 80)),
         ("D", pid.d,   (255, 160, 40)),
         ("→", pid.out, (220, 220, 220)),
     ]
-    bar_max = max(abs(v) for _, v, _ in components) or 0.01
-    bar_area_w = w - 70
-    row_h = max((h - 22) // 4, 8)
-
+    bar_max  = max(abs(v) for _, v, _ in components) or 0.01
+    bar_area = w - 70
+    row_h    = max((h - 22) // 4, 8)
     for i, (lbl, val, col) in enumerate(components):
         ry  = y + 20 + i * row_h
-        bw  = int(abs(val) / bar_max * bar_area_w)
+        bw  = int(abs(val) / bar_max * bar_area)
         bx0 = x + 68
-
         if val >= 0:
-            cv2.rectangle(canvas, (bx0, ry + 2), (bx0 + bw, ry + row_h - 2), col, -1)
+            cv2.rectangle(canvas, (bx0, ry+2), (bx0+bw, ry+row_h-2), col, -1)
         else:
-            cv2.rectangle(canvas, (bx0 - bw, ry + 2), (bx0, ry + row_h - 2), col, -1)
-
-        # centre line
-        cv2.line(canvas, (bx0, ry + 2), (bx0, ry + row_h - 2), (80, 80, 80), 1)
+            cv2.rectangle(canvas, (bx0-bw, ry+2), (bx0, ry+row_h-2), col, -1)
+        cv2.line(canvas, (bx0, ry+2), (bx0, ry+row_h-2), (80,80,80), 1)
         cv2.putText(canvas, f"{lbl}:{val:+.4f}",
-            (x + 4, ry + row_h - 3), _FONT, 0.29, col, 1)
+            (x+4, ry+row_h-3), _FONT, 0.29, col, 1)
 
 
 def draw_topview(canvas, ox, oy, tag_x, tag_z, tag_yaw, state, trail):
-    """Bird's-eye map: robot at bottom-centre, tag above."""
-    cv2.rectangle(canvas, (ox, oy), (ox + MAP_W, oy + MAP_H), (14, 14, 14), -1)
-    cv2.rectangle(canvas, (ox, oy), (ox + MAP_W, oy + MAP_H), (48, 48, 48),  1)
-
-    rx = ox + MAP_CX
-    ry = oy + MAP_CY
-
-    # distance grid
+    cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (14,14,14), -1)
+    cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (48,48,48),  1)
+    rx = ox + MAP_CX; ry = oy + MAP_CY
     for zm in np.arange(0.2, 2.5, 0.2):
         gy  = ry - int(zm * MAP_SCALE)
-        col = (45, 45, 45) if round(zm * 5) % 5 else (65, 65, 65)
-        if oy < gy < oy + MAP_H:
-            cv2.line(canvas, (ox, gy), (ox + MAP_W, gy), col, 1)
-
-    # zone lines
-    for zm, col in [(Z_ALIGN,   (60, 140, 255)),
-                    (Z_FORWARD, (60, 200,  80)),
-                    (Z_STOP,    (30,  30, 220))]:
-        gy = ry - int(zm * MAP_SCALE)
-        if oy < gy < oy + MAP_H:
-            cv2.line(canvas, (ox, gy), (ox + MAP_W, gy), col, 1)
-            cv2.putText(canvas, f"{zm:.2f}m",
-                (ox + MAP_W - 40, gy - 2), _FONT, 0.26, col, 1)
-
-    # trail
+        col = (45,45,45) if round(zm*5)%5 else (65,65,65)
+        if oy < gy < oy+MAP_H:
+            cv2.line(canvas, (ox, gy), (ox+MAP_W, gy), col, 1)
+    for zm, col in [(Z_ALIGN,  (60,140,255)),
+                    (Z_FORWARD,(60,200, 80)),
+                    (Z_STOP,   (30, 30,220))]:
+        gy = ry - int(zm*MAP_SCALE)
+        if oy < gy < oy+MAP_H:
+            cv2.line(canvas, (ox, gy), (ox+MAP_W, gy), col, 1)
+            cv2.putText(canvas, f"{zm:.2f}m", (ox+MAP_W-40, gy-2), _FONT, 0.26, col, 1)
     for i in range(1, len(trail)):
-        cv2.line(canvas, trail[i - 1], trail[i], (35, 70, 35), 1)
-
-    scol = STATE_COLOR.get(state, (180, 180, 180))
-
-    # tag marker + orientation arrow
+        cv2.line(canvas, trail[i-1], trail[i], (35,70,35), 1)
+    scol = STATE_COLOR.get(state, (180,180,180))
     if tag_z is not None:
-        tx = rx + int(tag_x * MAP_SCALE)
-        ty = ry - int(tag_z * MAP_SCALE)
+        tx = rx + int(tag_x*MAP_SCALE)
+        ty = ry - int(tag_z*MAP_SCALE)
         cv2.circle(canvas, (tx, ty), 9, scol, -1)
-        # yaw arrow
-        ax = tx + int(math.sin(tag_yaw) * 26)
-        ay = ty - int(math.cos(tag_yaw) * 26)
-        cv2.arrowedLine(canvas, (tx, ty), (ax, ay), (255, 200, 0), 2, tipLength=0.4)
-        cv2.line(canvas, (rx, ry), (tx, ty), (50, 50, 50), 1)
-        cv2.putText(canvas, "TAG", (tx + 10, ty - 4), _FONT, 0.30, scol, 1)
-
-    # robot
-    cv2.circle(canvas, (rx, ry), 8, (0, 170, 255), -1)
-    cv2.arrowedLine(canvas, (rx, ry), (rx, ry - 24), (0, 220, 255), 2, tipLength=0.40)
-    cv2.putText(canvas, "MAP", (ox + 4, oy + 13), _FONT, 0.33, (90, 90, 90), 1)
+        ax = tx + int(math.sin(tag_yaw)*26)
+        ay = ty - int(math.cos(tag_yaw)*26)
+        cv2.arrowedLine(canvas, (tx,ty), (ax,ay), (255,200,0), 2, tipLength=0.4)
+        cv2.line(canvas, (rx,ry), (tx,ty), (50,50,50), 1)
+        cv2.putText(canvas, "TAG", (tx+10, ty-4), _FONT, 0.30, scol, 1)
+    cv2.circle(canvas, (rx,ry), 8, (0,170,255), -1)
+    cv2.arrowedLine(canvas, (rx,ry), (rx, ry-24), (0,220,255), 2, tipLength=0.40)
+    cv2.putText(canvas, "MAP", (ox+4, oy+13), _FONT, 0.33, (90,90,90), 1)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -364,20 +523,21 @@ class AprilTagServo(Node):
         self._load_params()
         self._build_camera_model()
         self._build_pids()
+        self._build_yolo()
         self._build_ros()
         self._init_state()
         if self.use_x11:
             self._x11_init()
-        self.timer = self.create_timer(0.05, self.loop)
+
         self.get_logger().info(
-            f"AprilTag Visual Servo | {self.W}×{self.H}"
-            f" | zones approach>{Z_ALIGN}m align>{Z_FORWARD}m fwd>{Z_STOP}m"
+            f"AprilTag Servo (Laptop) | {self.W}×{self.H}"
+            f" | YOLO guard={'ON' if not self.yolo.disabled else 'OFF'}"
+            f" | YOLO every {YOLO_EVERY} frames"
             f" | cmd={self._cmd_topic}")
 
     # ── Parameters ──────────────────────────────────────────────
     def _declare_params(self):
         d = self.declare_parameter
-        d('camera_id',     0)
         d('image_width',   640)
         d('image_height',  480)
         d('use_x11_debug', True)
@@ -387,7 +547,8 @@ class AprilTagServo(Node):
         d('max_linear',    0.40)
         d('max_angular',   0.60)
         d('cmd_topic',     '/cmd_vel_pid')
-        # Camera intrinsics (640×480 calibrated)
+        d('yolo_model',    'best.pt')   # path to YOLO model
+        # Camera intrinsics
         d('fx', 651.50491737); d('fy', 650.39077601)
         d('cx', 320.62707882); d('cy', 236.91812436)
         d('dist_k1',  0.21581633); d('dist_k2', -1.09508649)
@@ -396,17 +557,17 @@ class AprilTagServo(Node):
 
     def _load_params(self):
         g = self.get_parameter
-        self.cam_id       = g('camera_id').value
-        self.W            = g('image_width').value
-        self.H            = g('image_height').value
-        self.use_x11      = g('use_x11_debug').value
-        self.invert_x     = g('invert_x').value
-        self.invert_yaw   = g('invert_yaw').value
-        self.tag_size     = g('tag_size').value
-        self.max_linear   = g('max_linear').value
-        self.max_angular  = g('max_angular').value
-        self._cmd_topic   = g('cmd_topic').value
-        self.fx  = g('fx').value;  self.fy  = g('fy').value
+        self.W           = g('image_width').value
+        self.H           = g('image_height').value
+        self.use_x11     = g('use_x11_debug').value
+        self.invert_x    = g('invert_x').value
+        self.invert_yaw  = g('invert_yaw').value
+        self.tag_size    = g('tag_size').value
+        self.max_linear  = g('max_linear').value
+        self.max_angular = g('max_angular').value
+        self._cmd_topic  = g('cmd_topic').value
+        self._yolo_model = g('yolo_model').value
+        self.fx  = g('fx').value;  self.fy = g('fy').value
         self.cx0 = g('cx').value;  self.cy0 = g('cy').value
 
     def _build_camera_model(self):
@@ -424,30 +585,38 @@ class AprilTagServo(Node):
             nthreads=2, quad_decimate=1.5, refine_edges=1)
 
     def _build_pids(self):
-        # Bearing PID  (APPROACH)
-        #   error  = bearing = atan2(x, z)
-        #   output = raw angular value  →  cmd.angular.z = -output
         self.pid_b = PID(APPROACH_KP, APPROACH_KI, APPROACH_KD,
                          lo=-APPROACH_W_MAX, hi=APPROACH_W_MAX)
-
-        # Yaw PID  (ALIGN)
-        #   error  = tag_normal_yaw
-        #   output = raw angular value  →  cmd.angular.z = -output
         self.pid_y = PID(ALIGN_KP, ALIGN_KI, ALIGN_KD,
                          lo=-ALIGN_W_MAX, hi=ALIGN_W_MAX)
 
+    def _build_yolo(self):
+        self.yolo = YOLOGuard(
+            model_path=self._yolo_model,
+            conf=YOLO_CONF,
+            margin=YOLO_MARGIN,
+            stale_max=YOLO_STALE_MAX,
+            class_name=YOLO_CLASS_NAME,
+            top_band_ratio=YOLO_TOP_BAND_RATIO,
+        )
+
     def _build_ros(self):
-        self.cmd_pub  = self.create_publisher(Twist,            self._cmd_topic, 1)
-        self.dbg_pub  = self.create_publisher(Float32MultiArray, '/vision_debug', 5)
-        self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance', 5)
-        self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',          5)
-        self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',  5)
-        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',              1)
+        # Subscriber: รับภาพจาก Pi
+        self.sub_img = self.create_subscription(
+            CompressedImage,
+            '/camera/image_raw/compressed',
+            self._image_callback,
+            10)
+
+        # Publishers
+        self.cmd_pub      = self.create_publisher(Twist,            self._cmd_topic,               1)
+        self.dbg_pub      = self.create_publisher(Float32MultiArray, '/vision_debug',               5)
+        self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance',  5)
+        self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',           5)
+        self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',   5)
+        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',               1)
+
         self.bridge = CvBridge()
-        self.cap = cv2.VideoCapture(self.cam_id)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.W)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def _init_state(self):
         self.state      = STATE_SEARCH
@@ -455,45 +624,40 @@ class AprilTagServo(Node):
         self.tag        = TagSmoother(alpha=0.55, window=3)
         self.n_stable   = 0
         self.n_miss     = 0
-        self.last_t     = None   # last time tag was seen (rclpy.Time)
+        self.last_t     = None
         self.published  = False
 
-        self._sframe    = 0      # frames in current state (hysteresis)
-        self._last_wdir = 1.0    # last rotation direction (for SCAN_BACK)
+        self._sframe    = 0
+        self._last_wdir = 1.0
 
-        # SCAN_BACK
         self._sb_t0     = None
         self._sb_last_t = None
         self._sb_turned = 0.0
         self._sb_dir    = 1.0
 
-        # REVERSE
         self._rv_t0     = None
 
-        # Stuck detection
         self._stuck_z   = None
         self._stuck_t   = None
         self._stuck_n   = 0
 
+        # YOLO guard tracking
+        self._yolo_frame = 0   # เฟรมนับสำหรับ YOLO interval
+
     # ── X11 init ────────────────────────────────────────────────
     def _x11_init(self):
         n = HIST_N
-        # Signals
-        self.rb_bear = Ring(n)          # bearing (approach error)
-        self.rb_yaw  = Ring(n)          # tag yaw (align error)
-        self.rb_w    = Ring(n)          # angular.z output
-        self.rb_v    = Ring(n)          # linear.x output
-        self.rb_z    = Ring(n, 2.0)     # tag distance
-        self.rb_x    = Ring(n)          # tag lateral position
-        # PID components — bearing
+        self.rb_bear = Ring(n)
+        self.rb_yaw  = Ring(n)
+        self.rb_w    = Ring(n)
+        self.rb_v    = Ring(n)
+        self.rb_z    = Ring(n, 2.0)
+        self.rb_x    = Ring(n)
         self.rb_bP   = Ring(n)
         self.rb_bD   = Ring(n)
-        # PID components — yaw
         self.rb_yP   = Ring(n)
         self.rb_yD   = Ring(n)
-
         self._trail: list[tuple[int, int]] = []
-
         cv2.namedWindow("AprilTag Servo", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("AprilTag Servo", WIN_W, WIN_H)
         self.get_logger().info("X11 window open  [Q/Esc=quit  C=clear trail]")
@@ -505,9 +669,8 @@ class AprilTagServo(Node):
         self.rb_z.push(z       if z       is not None else 2.0)
         self.rb_bear.push(bearing if bearing is not None else 0.0)
         self.rb_yaw.push(yaw   if yaw     is not None else 0.0)
-        self.rb_bP.push(self.pid_b.p);  self.rb_bD.push(self.pid_b.d)
-        self.rb_yP.push(self.pid_y.p);  self.rb_yD.push(self.pid_y.d)
-
+        self.rb_bP.push(self.pid_b.p); self.rb_bD.push(self.pid_b.d)
+        self.rb_yP.push(self.pid_y.p); self.rb_yD.push(self.pid_y.d)
         if x is not None and z is not None:
             px = CAM_W + MAP_CX + int(x * MAP_SCALE)
             py = MAP_CY - int(z * MAP_SCALE)
@@ -517,92 +680,82 @@ class AprilTagServo(Node):
                     self._trail.pop(0)
 
     def _x11_draw(self, frame, cmd, x, z, yaw, bearing):
-        cv2.destroyWindow
         canvas = np.zeros((WIN_H, WIN_W, 3), dtype=np.uint8)
         scol   = STATE_COLOR.get(self.state, (180, 180, 180))
 
-        # ── Camera preview ───────────────────────────────────────
         cam = cv2.resize(frame, (CAM_W, CAM_H))
         cv2.rectangle(cam, (0, 0), (CAM_W, 26), (0, 0, 0), -1)
         cv2.putText(cam, STATE_NAME.get(self.state, "?"),
             (6, 19), _FONT, 0.60, scol, 2)
-        canvas[0:CAM_H, 0:CAM_W] = cam
 
-        # ── Top-view map ─────────────────────────────────────────
+        # YOLO guard status overlay
+        yolo_status = "YOLO:OFF" if self.yolo.disabled else \
+                      f"YOLO:{'OK' if self.yolo.yolo_ok else 'STALE'} age={self.yolo.bbox_age}"
+        yolo_col = (80,80,80) if self.yolo.disabled else \
+                   ((0,220,120) if self.yolo.yolo_ok else (80,80,200))
+        cv2.putText(cam, yolo_status, (6, CAM_H - 8), _FONT, 0.35, yolo_col, 1)
+
+        canvas[0:CAM_H, 0:CAM_W] = cam
         draw_topview(canvas, CAM_W, 0,
             x   if x   is not None else 0.0,
             z   if z   is not None else None,
             yaw if yaw is not None else 0.0,
             self.state, self._trail)
 
-        # ── Info bar (below camera + map) ─────────────────────────
         ib = INFO_Y
-        cv2.rectangle(canvas, (0, ib), (CAM_W + MAP_W, WIN_H), (12, 12, 12), -1)
-
-        # State badge
-        cv2.rectangle(canvas, (8, ib + 4), (170, ib + 34), scol, -1)
+        cv2.rectangle(canvas, (0, ib), (CAM_W + MAP_W, WIN_H), (12,12,12), -1)
+        cv2.rectangle(canvas, (8, ib+4), (170, ib+34), scol, -1)
         cv2.putText(canvas, STATE_NAME.get(self.state, "?"),
-            (12, ib + 24), _FONT, 0.46, (0, 0, 0), 2)
+            (12, ib+24), _FONT, 0.46, (0,0,0), 2)
 
         nan = float('nan')
         xv = x       if x       is not None else nan
         zv = z       if z       is not None else nan
         yv = yaw     if yaw     is not None else nan
         bv = bearing if bearing is not None else nan
-
-        def fmtdeg(v): return f"{math.degrees(v):+.1f}°" if not math.isnan(v) else "---"
+        fmtdeg = lambda v: f"{math.degrees(v):+.1f}°" if not math.isnan(v) else "---"
 
         fields = [
-            ("x",        f"{xv:+.3f}m",         (  0, 210, 210)),
-            ("z",        f"{zv:.3f}m",           ( 80, 255,  80)),
-            ("bearing",  fmtdeg(bv),              (  0, 190, 255)),
-            ("yaw",      fmtdeg(yv),              (255, 195,  30)),
-            ("v",        f"{cmd.linear.x:+.3f}",  (200, 200, 200)),
-            ("ω",        f"{cmd.angular.z:+.3f}", (  0, 155, 255)),
-            ("stable",   str(self.n_stable),      (140, 140, 140)),
-            ("stuck#",   str(self._stuck_n),      (255,  70,  70)),
+            ("x",      f"{xv:+.3f}m",         (  0,210,210)),
+            ("z",      f"{zv:.3f}m",           ( 80,255, 80)),
+            ("bearing",fmtdeg(bv),             (  0,190,255)),
+            ("yaw",    fmtdeg(yv),             (255,195, 30)),
+            ("v",      f"{cmd.linear.x:+.3f}", (200,200,200)),
+            ("ω",      f"{cmd.angular.z:+.3f}",(  0,155,255)),
+            ("stable", str(self.n_stable),     (140,140,140)),
+            ("stuck#", str(self._stuck_n),     (255, 70, 70)),
         ]
         for i, (lbl, val, fc) in enumerate(fields):
             gx = 178 + (i % 4) * 72
             gy = ib + 18 + (i // 4) * 28
-            cv2.putText(canvas, lbl,  (gx, gy),      _FONT, 0.28, (90,  90,  90), 1)
-            cv2.putText(canvas, val,  (gx, gy + 14),  _FONT, 0.37, fc,            1)
+            cv2.putText(canvas, lbl, (gx, gy),     _FONT, 0.28, (90,90,90), 1)
+            cv2.putText(canvas, val, (gx, gy+14),  _FONT, 0.37, fc,         1)
 
-        # PID gain display
         gain_y = ib + INFO_H - 14
         cv2.putText(canvas,
             f"BEARING PID  Kp={APPROACH_KP}  Ki={APPROACH_KI}  Kd={APPROACH_KD}",
-            (8, gain_y - 16), _FONT, 0.30, (80, 80, 80), 1)
+            (8, gain_y-16), _FONT, 0.30, (80,80,80), 1)
         cv2.putText(canvas,
             f"YAW PID      Kp={ALIGN_KP}  Ki={ALIGN_KI}  Kd={ALIGN_KD}",
-            (8, gain_y), _FONT, 0.30, (80, 80, 80), 1)
+            (8, gain_y),    _FONT, 0.30, (80,80,80), 1)
 
-        # ── Right panel: strip charts ─────────────────────────────
-        rx  = CHART_X + 2
-        rw  = CHART_W - 4
-        n_strips = 7
-        sh  = (WIN_H - 4) // n_strips        # strip height
-
+        rx = CHART_X + 2; rw = CHART_W - 4
+        sh = (WIN_H - 4) // 7
         strips = [
-            # (ring,        label,          lo,    hi,   colour)
-            (self.rb_z,    "z (m)",         0.0,   2.0,  (  0, 220, 210)),
-            (self.rb_x,    "x (m)",        -0.8,   0.8,  (255, 180,   0)),
-            (self.rb_bear, "bearing (rad)", -1.5,   1.5,  (  0, 190, 255)),
-            (self.rb_yaw,  "yaw (rad)",    -1.5,   1.5,  (255, 195,  30)),
-            (self.rb_w,    "ω (rad/s)",    -0.8,   0.8,  (  0, 155, 255)),
-            (self.rb_v,    "v (m/s)",      -0.05,  0.35, (  0, 210,   0)),
+            (self.rb_z,    "z (m)",         0.0,  2.0, (  0,220,210)),
+            (self.rb_x,    "x (m)",        -0.8,  0.8, (255,180,  0)),
+            (self.rb_bear, "bearing (rad)",-1.5,  1.5, (  0,190,255)),
+            (self.rb_yaw,  "yaw (rad)",    -1.5,  1.5, (255,195, 30)),
+            (self.rb_w,    "ω (rad/s)",    -0.8,  0.8, (  0,155,255)),
+            (self.rb_v,    "v (m/s)",      -0.05, 0.35,(  0,210,  0)),
         ]
         for i, (ring, lbl, lo, hi, col) in enumerate(strips):
-            draw_strip(canvas, rx, i * sh, rw, sh - 2, ring, lbl, lo, hi, col)
+            draw_strip(canvas, rx, i*sh, rw, sh-2, ring, lbl, lo, hi, col)
 
-        # ── PID breakdown panels (bottom of right panel) ──────────
-        pd_y  = 6 * sh
-        pd_h  = WIN_H - pd_y - 2
-        pd_hw = (rw - 2) // 2
-
-        draw_pid_panel(canvas, rx,           pd_y, pd_hw, pd_h,
+        pd_y = 6*sh; pd_h = WIN_H - pd_y - 2; pd_hw = (rw-2)//2
+        draw_pid_panel(canvas, rx,         pd_y, pd_hw, pd_h,
                        self.pid_b, "BEARING PID (approach)")
-        draw_pid_panel(canvas, rx + pd_hw + 2, pd_y, pd_hw, pd_h,
+        draw_pid_panel(canvas, rx+pd_hw+2, pd_y, pd_hw, pd_h,
                        self.pid_y, "YAW PID (align)")
 
         cv2.imshow("AprilTag Servo", canvas)
@@ -612,10 +765,44 @@ class AprilTagServo(Node):
         if key == ord('c'):
             self._trail.clear()
 
-    # ── AprilTag detection ──────────────────────────────────────
+    # ── Image callback ──────────────────────────────────────────
+    def _image_callback(self, msg: CompressedImage):
+        """รับภาพ compressed จาก Pi แล้วประมวลผล"""
+        try:
+            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
+            frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return
+        except Exception as e:
+            self.get_logger().warn(f"decode error: {e}", throttle_duration_sec=1.0)
+            return
+
+        self._process_frame(frame)
+
+    # ── AprilTag detection with YOLO guard ──────────────────────
     def _detect(self, frame):
+        """
+        1. รัน YOLO ทุก YOLO_EVERY เฟรม เพื่ออัพเดท bbox
+        2. Detect AprilTag ทุกเฟรม
+        3. ยอมรับ tag เฉพาะที่ corners อยู่ใน YOLO bbox
+        """
         undist = cv2.undistort(frame, self.K, self.D, None, self.K_new)
         gray   = cv2.cvtColor(undist, cv2.COLOR_BGR2GRAY)
+
+        # ── YOLO guard update ────────────────────────────────────
+        self._yolo_frame += 1
+        if self._yolo_frame % YOLO_EVERY == 0:
+            self.yolo.update(frame)
+            self.get_logger().info(
+                f"[YOLO] update: bbox={self.yolo.bbox} ok={self.yolo.yolo_ok}",
+                throttle_duration_sec=0.5)
+        else:
+            self.yolo.tick()
+
+        # วาด YOLO bbox บน frame เสมอ (debug)
+        self.yolo.draw(frame)
+
+        # ── AprilTag detection ───────────────────────────────────
         try:
             dets = self.detector.detect(
                 gray, estimate_tag_pose=True,
@@ -628,25 +815,46 @@ class AprilTagServo(Node):
         if not dets:
             return None
 
-        best     = max(dets, key=lambda d: cv2.contourArea(d.corners.astype(int)))
+        # ── YOLO guard: กรองเฉพาะ tag ที่อยู่บริเวณ top-edge ────
+        valid_dets = []
+        for det in dets:
+            corners = det.corners.astype(int)   # shape (4,2)
+            ok, info = self.yolo.is_tag_valid(corners)
+            if ok:
+                valid_dets.append(det)
+            else:
+                # วาด tag ที่ถูก reject ด้วยสีแดง + แสดงเหตุผล
+                for i in range(4):
+                    cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1)%4]),
+                             (0, 0, 180), 1)
+                reason = info.get('reason', '')
+                cv2.putText(frame, f"REJECT:{reason}",
+                            (corners[0][0], corners[0][1] - 4),
+                            _FONT, 0.30, (0, 60, 220), 1)
+
+        if not valid_dets:
+            # วาด tag ที่ถูก detect แต่ทั้งหมด reject
+            if dets:
+                cv2.putText(frame, "NO VALID TAG (YOLO guard)",
+                            (6, self.H - 30), _FONT, 0.40, (0, 60, 220), 1)
+            return None
+
+        # ── เลือก tag ที่ใหญ่สุด (closest) ─────────────────────
+        best     = max(valid_dets, key=lambda d: cv2.contourArea(d.corners.astype(int)))
         tx, _, tz = best.pose_t.flatten()
 
-        # x: positive = tag is to the RIGHT of robot
         x_m = float(tx) * (-1.0 if self.invert_x else 1.0)
         z_m = float(tz)
 
-        # tag_normal_yaw:
-        #   R[:,2] is the tag Z-axis (normal to tag face) in camera frame
-        #   nx = lateral component, nz = forward component
-        #   yaw = atan2(nx, nz) ≈ 0 when robot is perfectly parallel
         R   = best.pose_R
         nx  = float(R[0, 2])
         nz  = float(R[2, 2])
         yaw = math.atan2(nx, nz) * (-1.0 if self.invert_yaw else 1.0)
 
-        # Annotate
-        tag_id = best.tag_id
+        tag_id  = best.tag_id
         corners = best.corners.astype(int)
+
+        # วาด tag ที่ accepted
         for i in range(4):
             cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1)%4]), (255, 0, 255), 2)
         bearing = math.atan2(x_m, max(z_m, 0.05))
@@ -655,7 +863,7 @@ class AprilTagServo(Node):
             f" bear={math.degrees(bearing):+.1f}° yaw={math.degrees(yaw):+.1f}°",
             (6, self.H - 14), _FONT, 0.35, (255, 60, 255), 1)
 
-        # Publish once stable
+        # ── Publish tag info (one-shot) ─────────────────────────
         if self.n_stable >= STABLE_REQUIRED and not self.published:
             ab = tag_id // 1000
             c  = (tag_id // 100) % 10
@@ -677,19 +885,16 @@ class AprilTagServo(Node):
         if new_state == self.state:
             self._sframe += 1
             return
-        # hysteresis: don't thrash between nav states
         if not force:
             stable_states = (STATE_SEARCH, STATE_DONE, STATE_SCAN_BACK, STATE_REVERSE)
             if self.state not in stable_states and self._sframe < 3:
                 return
-
         self.get_logger().info(
             f"[STATE] {STATE_NAME[self.state]} → {STATE_NAME[new_state]}"
             f"  (held {self._sframe} fr{'  FORCE' if force else ''})")
         self.state   = new_state
         self._sframe = 0
         self._stuck_z = None; self._stuck_t = None
-
         if new_state in (STATE_APPROACH,):
             self.pid_b.reset()
         if new_state in (STATE_ALIGN,):
@@ -702,13 +907,12 @@ class AprilTagServo(Node):
             self._sb_t0     = self.get_clock().now().nanoseconds / 1e9
             self._sb_last_t = self._sb_t0
             self._sb_turned = 0.0
-            self._sb_dir    = -self._last_wdir   # reverse of last spin direction
+            self._sb_dir    = -self._last_wdir
             self.get_logger().warn(
                 f"[SCAN_BACK] dir={'R' if self._sb_dir > 0 else 'L'}"
                 f"  max={SCAN_BACK_MAX_DEG:.0f}°")
 
     def _next_nav_state(self, z):
-        """Pure distance threshold state progression."""
         if z <= Z_STOP:    return STATE_DONE
         if z <= Z_FORWARD: return STATE_FORWARD
         if z <= Z_ALIGN:   return STATE_ALIGN
@@ -730,61 +934,30 @@ class AprilTagServo(Node):
                 self._go(STATE_REVERSE, force=True)
             self._stuck_z = z; self._stuck_t = now
 
-    # ════════════════════════════════════════════════════════════
-    # Control laws
-    # ════════════════════════════════════════════════════════════
+    # ── Control laws ─────────────────────────────────────────────
     def _control(self, x, z, yaw, bearing, cmd):
-        """
-        Core PID visual servo control.
-
-        Sign convention (consistent everywhere):
-          bearing > 0  →  tag is to the RIGHT  →  turn right  →  angular.z < 0
-          bearing < 0  →  tag is to the LEFT   →  turn left   →  angular.z > 0
-          angular.z = -PID_output
-          (PID output has same sign as error, negating maps to robot frame)
-        """
         s = self.state
 
-        # ── SEARCH: spin slowly ─────────────────────────────────
         if s == STATE_SEARCH:
             cmd.linear.x  = 0.0
             cmd.angular.z = SEARCH_W
-            self._last_wdir = 1.0   # spinning left (+ω)
+            self._last_wdir = 1.0
 
-        # ── APPROACH: bearing PID ───────────────────────────────
-        # bearing = atan2(x, z)  [symmetric: works left AND right]
-        # angular.z = -pid_b.update(bearing)
-        #   bearing=+0.5 (right) → pid_b→+0.75 → angular=-0.75 (turn right) ✓
-        #   bearing=-0.5 (left)  → pid_b→-0.75 → angular=+0.75 (turn left)  ✓
         elif s == STATE_APPROACH:
             raw_w = self.pid_b.update(bearing)
-            cmd.angular.z = -raw_w   # negate to robot convention
-
+            cmd.angular.z = -raw_w
             if abs(cmd.angular.z) > 0.01:
                 self._last_wdir = math.copysign(1.0, cmd.angular.z)
-
-            # Forward speed scales with cos(bearing):
-            #   bearing=0°  → cos=1.0 → full speed (straight ahead)
-            #   bearing=60° → cos=0.5 → half speed (arcing)
-            #   bearing=90° → cos=0.0 → turn-in-place (clamped to 0.2)
-            # Produces a smooth arc, not a spiral.
-            align_factor = max(0.2, math.cos(bearing))
-            cmd.linear.x = APPROACH_V_BASE * align_factor
-
+            align_factor  = max(0.2, math.cos(bearing))
+            cmd.linear.x  = APPROACH_V_BASE * align_factor
             self.get_logger().info(
                 f"[APPROACH] x={x:+.3f} z={z:.3f}"
-                f"  bear={math.degrees(bearing):+.1f}°"
-                f"  cos={align_factor:.2f}"
+                f"  bear={math.degrees(bearing):+.1f}°  cos={align_factor:.2f}"
                 f"  P={self.pid_b.p:+.3f} D={self.pid_b.d:+.3f}"
                 f"  ω={cmd.angular.z:+.3f} v={cmd.linear.x:.3f}",
                 throttle_duration_sec=0.25)
             self._check_stuck(z)
 
-        # ── ALIGN: yaw PID ─────────────────────────────────────
-        # yaw = tag_normal_yaw  (0 = robot parallel to tag)
-        # angular.z = -pid_y.update(yaw)
-        #   yaw=+0.3 (tag normal right) → pid_y→+0.6 → angular=-0.6 (turn right) ✓
-        #   yaw=-0.3 (tag normal left)  → pid_y→-0.6 → angular=+0.6 (turn left)  ✓
         elif s == STATE_ALIGN:
             if abs(yaw) < ALIGN_YAW_DEAD:
                 cmd.angular.z = 0.0
@@ -792,29 +965,17 @@ class AprilTagServo(Node):
             else:
                 raw_w = self.pid_y.update(yaw)
                 cmd.angular.z = -raw_w
-
             if abs(cmd.angular.z) > 0.01:
                 self._last_wdir = math.copysign(1.0, cmd.angular.z)
-
-            # Linear speed scales with cos(yaw):
-            #   yaw=0°  → cos=1.0 → full ALIGN_V (already parallel, keep moving)
-            #   yaw=60° → cos=0.5 → half speed
-            #   yaw=90° → cos=0.0 → rotate in-place, no forward motion
-            # Prevents approaching at an angle when still misaligned.
             yaw_factor   = max(0.0, math.cos(yaw))
             cmd.linear.x = ALIGN_V * yaw_factor
-
             self.get_logger().info(
-                f"[ALIGN] yaw={math.degrees(yaw):+.1f}°"
-                f"  cos={yaw_factor:.2f}"
+                f"[ALIGN] yaw={math.degrees(yaw):+.1f}°  cos={yaw_factor:.2f}"
                 f"  P={self.pid_y.p:+.3f} D={self.pid_y.d:+.3f}"
                 f"  ω={cmd.angular.z:+.3f} v={cmd.linear.x:.3f}",
                 throttle_duration_sec=0.25)
             self._check_stuck(z)
 
-        # ── FORWARD: drive straight in, no steering correction ──────
-        # Tag is at a known offset (DOCK_X, DOCK_BEARING) — that's normal.
-        # ALIGN has already made the robot parallel; just drive in.
         elif s == STATE_FORWARD:
             cmd.linear.x  = FORWARD_V
             cmd.angular.z = 0.0
@@ -823,29 +984,25 @@ class AprilTagServo(Node):
                 throttle_duration_sec=0.3)
             self._check_stuck(z)
 
-        # ── SCAN_BACK: reverse-spin to find lost tag ────────────
         elif s == STATE_SCAN_BACK:
             cmd.linear.x = 0.0
             now  = self.get_clock().now().nanoseconds / 1e9
             elap = now - (self._sb_t0 or now)
             dt   = now - (self._sb_last_t or now)
             self._sb_last_t = now
-
             if elap > SCAN_BACK_TIMEOUT or \
                self._sb_turned >= math.radians(SCAN_BACK_MAX_DEG):
                 cmd.angular.z = 0.0
                 self.get_logger().warn("[SCAN_BACK] exhausted → SEARCH")
                 self._go(STATE_SEARCH, force=True)
                 return
-
-            cmd.angular.z = self._sb_dir * SCAN_BACK_W
+            cmd.angular.z    = self._sb_dir * SCAN_BACK_W
             self._sb_turned += abs(cmd.angular.z) * max(dt, 0.0)
             self.get_logger().info(
                 f"[SCAN_BACK] {math.degrees(self._sb_turned):.1f}°"
                 f"/{SCAN_BACK_MAX_DEG:.0f}° t={elap:.1f}s",
                 throttle_duration_sec=0.4)
 
-        # ── REVERSE ─────────────────────────────────────────────
         elif s == STATE_REVERSE:
             now  = self.get_clock().now().nanoseconds / 1e9
             elap = now - (self._rv_t0 or now)
@@ -863,7 +1020,7 @@ class AprilTagServo(Node):
                 self.get_logger().info("[REVERSE] done → SEARCH")
                 self._go(STATE_SEARCH, force=True)
 
-        else:   # DONE
+        else:  # DONE
             cmd.linear.x = cmd.angular.z = 0.0
 
     # ── Camera frame overlay ─────────────────────────────────────
@@ -881,35 +1038,29 @@ class AprilTagServo(Node):
             ov = frame.copy()
             cv2.rectangle(ov, (0, 26), (self.W, 72), (0, 0, 0), -1)
             cv2.addWeighted(ov, 0.5, frame, 0.5, 0, frame)
-            ftxt(frame, f"x={x:+.2f}",                      ( 4, 42), 0.36, (  0, 220, 220))
-            ftxt(frame, f"z={z:.2f}",                        (80, 42), 0.36, ( 80, 255,  80))
-            ftxt(frame, f"bear={math.degrees(bearing):+.1f}°",(155,42), 0.36, (  0, 190, 255))
-            ftxt(frame, f"yaw={math.degrees(yaw):+.1f}°",    (285,42), 0.36, (255, 195,  30))
-            ftxt(frame, f"v={cmd.linear.x:+.2f}",            ( 4, 60), 0.34, (200, 200, 200))
-            ftxt(frame, f"ω={cmd.angular.z:+.2f}",           (80, 60), 0.34, (  0, 155, 255))
-
-            # distance bar
+            ftxt(frame, f"x={x:+.2f}",                       ( 4, 42), 0.36, (  0,220,220))
+            ftxt(frame, f"z={z:.2f}",                         (80, 42), 0.36, ( 80,255, 80))
+            ftxt(frame, f"bear={math.degrees(bearing):+.1f}°",(155, 42), 0.36, (  0,190,255))
+            ftxt(frame, f"yaw={math.degrees(yaw):+.1f}°",    (285, 42), 0.36, (255,195, 30))
+            ftxt(frame, f"v={cmd.linear.x:+.2f}",            ( 4, 60), 0.34, (200,200,200))
+            ftxt(frame, f"ω={cmd.angular.z:+.2f}",           (80, 60), 0.34, (  0,155,255))
             bx = self.W - 10; by0 = 6; byh = self.H - 12
-            cv2.line(frame, (bx, by0), (bx, by0 + byh), (50, 50, 50), 2)
+            cv2.line(frame, (bx, by0), (bx, by0+byh), (50,50,50), 2)
             zy = by0 + int(byh * (1.0 - min(z, 2.0) / 2.0))
             cv2.circle(frame, (bx, zy), 5, col, -1)
-            for zt, tc in [(Z_ALIGN,   (60,140,255)),
-                           (Z_FORWARD, (60,200, 80)),
-                           (Z_STOP,    (30, 30,220))]:
+            for zt, tc in [(Z_ALIGN,  (60,140,255)),
+                           (Z_FORWARD,(60,200, 80)),
+                           (Z_STOP,   (30, 30,220))]:
                 ty = by0 + int(byh * (1.0 - zt / 2.0))
                 cv2.line(frame, (bx-5, ty), (bx+5, ty), tc, 1)
 
-    # ── Main loop ────────────────────────────────────────────────
-    def loop(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            return
-
+    # ── Main processing ──────────────────────────────────────────
+    def _process_frame(self, frame):
         self.frame_cnt += 1
         cmd = Twist()
         x = z = yaw = bearing = None
 
-        # ── Detection ───────────────────────────────────────────
+        # Detection
         if self.frame_cnt % DETECT_EVERY == 0:
             result = self._detect(frame)
             if result is not None:
@@ -920,15 +1071,14 @@ class AprilTagServo(Node):
                 if self.state == STATE_SCAN_BACK and \
                    self.n_stable >= STABLE_REQUIRED:
                     self.get_logger().info(
-                        f"[SCAN_BACK] tag found"
-                        f"  x={self.tag.x:+.3f}m → APPROACH")
+                        f"[SCAN_BACK] tag found x={self.tag.x:+.3f}m → APPROACH")
                     self._go(STATE_APPROACH, force=True)
             else:
                 self.n_miss += 1
                 if self.n_miss > MISS_GRACE:
                     self.n_stable = 0
 
-        # ── Lost-tag watchdog (nav states only) ─────────────────
+        # Lost-tag watchdog
         if self.state in (STATE_APPROACH, STATE_ALIGN, STATE_FORWARD):
             if self.last_t is not None:
                 lost = (self.get_clock().now() - self.last_t).nanoseconds / 1e9
@@ -937,7 +1087,7 @@ class AprilTagServo(Node):
                     self._go(STATE_SCAN_BACK, force=True)
                     self.n_stable = 0
 
-        # ── Execute state ────────────────────────────────────────
+        # Execute state
         if self.state == STATE_DONE:
             cmd.linear.x = cmd.angular.z = 0.0
 
@@ -948,20 +1098,17 @@ class AprilTagServo(Node):
             if self.tag.valid and self.n_stable >= STABLE_REQUIRED:
                 side = "RIGHT" if self.tag.x > 0 else "LEFT"
                 self.get_logger().info(
-                    f"[SEARCH] tag found  x={self.tag.x:+.3f}m ({side})"
-                    f"  bear={math.degrees(self.tag.bearing):+.1f}°"
-                    f" → APPROACH")
+                    f"[SEARCH] tag found x={self.tag.x:+.3f}m ({side})"
+                    f"  bear={math.degrees(self.tag.bearing):+.1f}° → APPROACH")
                 self._go(STATE_APPROACH, force=True)
             else:
                 self._control(None, None, None, None, cmd)
 
         elif self.tag.valid and self.n_stable >= STABLE_REQUIRED:
             x, z, yaw = self.tag.x, self.tag.z, self.tag.yaw
-            bearing    = self.tag.bearing   # atan2(x, z) always fresh
+            bearing    = self.tag.bearing
             self._go(self._next_nav_state(z))
             self._control(x, z, yaw, bearing, cmd)
-
-        # else: waiting for enough stable frames — stay still
 
         self._overlay(frame, cmd, x, z, yaw, bearing)
 
@@ -1000,7 +1147,6 @@ def main(args=None):
     finally:
         if node.use_x11:
             cv2.destroyAllWindows()
-        node.cap.release()
         node.destroy_node()
         rclpy.shutdown()
 

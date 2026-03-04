@@ -49,6 +49,8 @@ setup(
             'test_sensor_publisher = robot_bringup.test_sensor_publisher:main',
             'reset_manager_node = robot_bringup.reset_manager_node:main',
             'yolo_vision_node = robot_bringup.yolo_vision_node:main',
+            'pi_camera_publisher = robot_bringup.pi_camera_publisher:main',
+            'laptop_node = robot_bringup.laptop_node:main',
         ],
     },
 )
