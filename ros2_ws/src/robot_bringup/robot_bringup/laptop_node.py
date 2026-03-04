@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """
 Laptop AprilTag Visual Servo — ROS2  (with YOLO guard)
 ============================================================
@@ -43,6 +43,8 @@ import cv2
 import numpy as np
 from pupil_apriltags import Detector
 
+import sys
+print("PYTHON =", sys.executable)
 # YOLO (ultralytics)
 try:
     from ultralytics import YOLO
@@ -140,7 +142,7 @@ MISS_GRACE      = 5
 
 # ── YOLO Guard ───────────────────────────────────────────────────
 YOLO_EVERY      = 10      # รัน YOLO ทุก N เฟรม
-YOLO_CONF       = 0.40    # confidence threshold
+YOLO_CONF       = 0.25    # confidence threshold
 YOLO_MARGIN     = 30      # pixel margin สำหรับ x-range และ top-edge tolerance
 YOLO_TOP_BAND_RATIO = 0.35  # สัดส่วนความสูง bbox ที่ถือว่า "ด้านบน"
                              # 0.35 = อนุญาต tag ใน 35% บนสุดของ YOLO bbox
@@ -547,7 +549,7 @@ class AprilTagServo(Node):
         d('max_linear',    0.40)
         d('max_angular',   0.60)
         d('cmd_topic',     '/cmd_vel_pid')
-        d('yolo_model',    'best.pt')   # path to YOLO model
+        d('yolo_model', '/home/chaiyapruk/392_auto/Agriculture_Robot_Auto/ros2_ws/best.pt')   # path to YOLO model
         # Camera intrinsics
         d('fx', 651.50491737); d('fy', 650.39077601)
         d('cx', 320.62707882); d('cy', 236.91812436)
