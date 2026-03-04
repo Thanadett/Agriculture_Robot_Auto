@@ -11,6 +11,8 @@
 // ตัวแปรสำหรับกลไก
 PlantingManager robot;
 //docker run -it --rm -v /dev:/dev --privileged --net=host -e ROS_DOMAIN_ID=69 microros/micro-ros-agent:jazzy serial --dev /dev/ttyUSB0 -b 115200
+
+//ros2 topic pub --once /plant_command std_msgs/msg/String "{data: '1'}" 
 // micro-ROS entities
 rcl_publisher_t ultra_pub;
 rcl_publisher_t feedback_pub;
