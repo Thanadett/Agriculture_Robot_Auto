@@ -30,7 +30,7 @@ void PlantingManager::begin() {
     servo_gripper.attach(SERVO_PIN_gripper, 500, 2500); // gripper
     servo_linear.attach(SERVO_PIN_linear, 500, 2500); // linear motion
     servo_plate.attach(SERVO_PIN_plate, 500, 2500);
-
+    servo_cam.attach(SERVO_PIN_cam, 500, 2500);
     // Setup Stepper
     pinMode(PIN_STEP, OUTPUT);
     pinMode(PIN_DIR, OUTPUT);
@@ -103,6 +103,22 @@ void PlantingManager::testpattern() {
     }
 }
 
+void PlantingManager::mv_cam_up_pattern() {
+    if (_activeMode == IDLE) {
+        _activeMode = MOVECAM_UP;
+        _currentStep = 1;
+        _previous_Millis = millis();
+    }
+}
+
+void PlantingManager::mv_cam_down_pattern() {
+    if (_activeMode == IDLE) {
+        _activeMode = MOVECAM_DOWN;
+        _currentStep = 1;
+        _previous_Millis = millis();
+    }
+}
+
 void PlantingManager::update() {
     // commands Stepper to process every steps (Non-blocking)
     _stepper.run();
@@ -135,6 +151,7 @@ void PlantingManager::update() {
                 case 1: // Reset Servo positions
                     servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
+                    // servo_cam.write(0);
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2: //Move Stepper to idle
@@ -320,8 +337,9 @@ void PlantingManager::update() {
         case TESTING:
             switch (_currentStep) {
                 case 1: // Reset Servo positions
-                    servo_gripper.write(158);
+                    servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
+                    // servo_cam.write(0);
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2: //Move Stepper to idle
@@ -471,7 +489,7 @@ void PlantingManager::update() {
                     }
                     break;
                 case 26: //
-                    servo_gripper.write(158);
+                    servo_gripper.write(160);
                     // servo_gripper.write(100); 
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
@@ -524,6 +542,30 @@ void PlantingManager::update() {
                     _currentStep = 0;   
                     _previous_Millis = currentMillis; 
                     }
+                    break;
+            }
+            break;
+        case MOVECAM_UP: 
+            switch (_currentStep) {
+                case 1: // 
+                    servo_cam.write(90);
+                    if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
+                    break;
+                case 2:
+                    _currentStep = 0;
+                    _activeMode = IDLE;
+                    break;
+            }
+            break;
+        case MOVECAM_DOWN: 
+            switch (_currentStep) {
+                case 1: // 
+                    servo_cam.write(0);
+                    if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
+                    break;
+                case 2:
+                    _currentStep = 0;
+                    _activeMode = IDLE;
                     break;
             }
             break;

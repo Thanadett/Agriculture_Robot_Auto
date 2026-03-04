@@ -4,11 +4,11 @@
 #include <AccelStepper.h>
 #include "config.h"
 
-enum TaskMode { IDLE, PLANTING, LOADING, TESTING };
+enum TaskMode { IDLE, PLANTING, LOADING, TESTING, MOVECAM_UP, MOVECAM_DOWN };
 class PlantingManager {
 private:
     TaskMode _activeMode = IDLE;
-    Servo servo_gripper, servo_linear, servo_plate;
+    Servo servo_gripper, servo_linear, servo_plate, servo_cam;
     AccelStepper _stepper;
     
     
@@ -47,6 +47,8 @@ public:
     void startPlantPattern();
     void LoadPattern();
     void testpattern();
+    void mv_cam_up_pattern();
+    void mv_cam_down_pattern();
     void update(); // call in loop()
     void stopAll(); // for Emergency Stop
 };
