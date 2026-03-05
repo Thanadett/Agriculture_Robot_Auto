@@ -51,6 +51,7 @@ setup(
             'yolo_vision_node = robot_bringup.yolo_vision_node:main',
             'pi_camera_publisher = robot_bringup.pi_camera_publisher:main',
             'laptop_node = robot_bringup.laptop_node:main',
+            'mission_controller = robot_bringup.mission_controller:main',
         ],
     },
 )
