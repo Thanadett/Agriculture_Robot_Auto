@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 
 venv/
+green_circle_pictures/

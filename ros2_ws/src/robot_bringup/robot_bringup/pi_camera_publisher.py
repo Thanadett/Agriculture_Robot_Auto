@@ -38,7 +38,7 @@ class CameraPublisher(Node):
         super().__init__('pi_camera_publisher')
 
         # ── Parameters ──────────────────────────────────────────
-        self.declare_parameter('camera_id',     0)
+        self.declare_parameter('camera_id',     1)
         self.declare_parameter('image_width',   640)
         self.declare_parameter('image_height',  480)
         self.declare_parameter('fps',           30)
