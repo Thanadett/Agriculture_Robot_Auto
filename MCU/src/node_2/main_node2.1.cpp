@@ -11,8 +11,7 @@
 // ตัวแปรสำหรับกลไก
 PlantingManager robot;
 //docker run -it --rm -v /dev:/dev --privileged --net=host -e ROS_DOMAIN_ID=69 microros/micro-ros-agent:jazzy serial --dev /dev/ttyUSB0 -b 115200
-
-//ros2 topic pub --once /plant_command std_msgs/msg/String "{data: '1'}" 
+//ros2 topic pub --once /msg std_msgs/msg/String "{data: 'DONE:planting'}"
 // micro-ROS entities
 rcl_publisher_t feedback_pub;
 rcl_subscription_t command_sub;
@@ -68,7 +67,7 @@ void command_callback(const void * msgin) {
 
     // ลำดับที่ 2: Start Plant
     publish_feedback("step 2");
-    robot.startPlantPattern(); // เปลี่ยน _activeMode เป็น PLANTING
+    robot.testpattern(); // เปลี่ยน _activeMode เป็น PLANTING
     waitRobotStop();
 
     // แจ้งว่าจบทุกกระบวนการ

@@ -535,7 +535,7 @@ void PlantingManager::update() {
                     }
                     break;
                 case 3:
-                    servo_plate.writeMicroseconds(angleToUs(HomeAngle));
+                    // servo_plate.writeMicroseconds(angleToUs(HomeAngle));
                     if (elapsed_pattern >= 1000) { 
                     // Serial.println("Loading System Done!");
                     _activeMode = IDLE; 
