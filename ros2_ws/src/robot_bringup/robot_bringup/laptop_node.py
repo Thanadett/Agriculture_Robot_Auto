@@ -81,7 +81,7 @@ ALIGN_V        = 0.08
 ALIGN_YAW_DEAD = math.radians(2.5)
 
 FORWARD_V = 0.10
-SEARCH_W  = 0.20
+SEARCH_W  = 0.08
 
 SCAN_BACK_W       = 0.18
 SCAN_BACK_MAX_DEG = 90.0
