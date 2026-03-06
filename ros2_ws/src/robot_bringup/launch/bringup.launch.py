@@ -49,8 +49,8 @@ def generate_launch_description():
 
     heading_pid = Node(
         package='robot_bringup',
-        executable='heading_pid',
-        name='heading_pid',
+        executable='heading_pid_node',
+        name='heading_pid_node',
         output='screen',
         parameters=[{
             'kp':              LaunchConfiguration('hdg_kp'),
@@ -88,8 +88,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [
-        apriltag_servo,
-        heading_pid,
+        laptop_node,
+        heading_pid_node,
         mission_controller,
         debug_x11,
     ])
