@@ -38,7 +38,10 @@ private:
 
 public:
     PlantingManager() : _stepper(AccelStepper::DRIVER, PIN_STEP, PIN_DIR) {}
+    
     int getCurrentStep() { return _currentStep; }
+    bool isBusy() { return _activeMode != IDLE; }
+
     long mmToSteps(float StepPermm);
     int angleToUs(float Angle); //for MG996R on plant plate
     int moveToAngle(int desireAngle, int maxAngle); //function for TD8135
