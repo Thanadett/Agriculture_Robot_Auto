@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Laptop AprilTag Visual Servo — ROS2  (with YOLO guard)
+Laptop AprilTag Visual Servo — ROS2  (with YOLO guard + Tag ID Lock)
 ============================================================
 รับภาพจาก Pi ผ่าน /camera/image_raw/compressed
 ประมวลผล AprilTag + YOLO guard บน Laptop แล้วส่ง cmd_vel กลับ Pi
 
-YOLO Guard Logic:
-  • รัน YOLO ทุก YOLO_EVERY=10 เฟรม เพื่อหา bounding box ของ object ที่ tag ติดอยู่
-  • AprilTag จะ "trusted" เฉพาะเมื่อ tag corners อยู่ภายใน YOLO bbox ± YOLO_MARGIN pixels
-  • ป้องกัน tag ผิดด้านหรือ tag ไกลๆ รบกวนระบบ
-  • ถ้า YOLO ไม่เจอ object → ใช้ YOLO bbox เดิม (stale) ได้นาน YOLO_STALE_MAX frames
-    หลังจากนั้น → ไม่ trust AprilTag จนกว่า YOLO จะ detect ใหม่
+YOLO Guard Logic (ใช้เฉพาะตอนหา tag ครั้งแรก):
+  • รัน YOLO เฉพาะตอนที่ยังไม่มี locked_tag_id
+  • ตรวจสอบว่า tag corners อยู่ภายใน YOLO bbox ± YOLO_MARGIN pixels
+  • เมื่อ lock แล้ว → ไม่ผ่าน YOLO อีก (ลด noise จาก YOLO bbox)
+
+Tag ID Lock Logic:
+  • เมื่อเลือก tag แรกได้ → lock tag_id นั้นไว้
+  • เฟรมถัดไปใช้เฉพาะ tag ที่มี id ตรงกัน
+  • ถ้าหาย LOCK_LOST_MAX เฟรมติดต่อกัน → ปลด lock แล้วหาใหม่
 
 Topics subscribed:
   /camera/image_raw/compressed  (sensor_msgs/CompressedImage)
@@ -138,16 +141,16 @@ STABLE_REQUIRED = 4
 LOST_TIMEOUT    = 4.0
 MISS_GRACE      = 5
 
-# ── YOLO Guard ───────────────────────────────────────────────────
-YOLO_EVERY      = 10      # รัน YOLO ทุก N เฟรม
-YOLO_CONF       = 0.40    # confidence threshold
-YOLO_MARGIN     = 30      # pixel margin สำหรับ x-range และ top-edge tolerance
-YOLO_TOP_BAND_RATIO = 0.35  # สัดส่วนความสูง bbox ที่ถือว่า "ด้านบน"
-                             # 0.35 = อนุญาต tag ใน 35% บนสุดของ YOLO bbox
-                             # ปรับขึ้นถ้า tag ติดต่ำกว่านี้, ลดถ้าต้องการเข้มขึ้น
-YOLO_STALE_MAX  = 30      # เฟรมที่ยอมให้ใช้ YOLO bbox เก่าก่อนจะหมดอายุ
-YOLO_CLASS_NAME = None    # None = ใช้ detection แรกที่ confidence สูงสุด
-                          # หรือระบุชื่อ class เช่น "apriltag_board"
+# ── Tag ID Lock ───────────────────────────────────────────────────
+LOCK_LOST_MAX    = 15   # เฟรมที่ยอมให้หาย tag ที่ lock ไว้ก่อนจะปลด lock
+PRELOCK_REQUIRED = 3    # ต้องเห็น tag_id เดิมติดต่อกัน N เฟรม ก่อนจะ lock
+
+# ── YOLO Guard (ใช้เฉพาะตอนหา tag ครั้งแรก) ──────────────────────
+YOLO_EVERY          = 10     # รัน YOLO ทุก N เฟรม (ใช้เฉพาะก่อน lock)
+YOLO_CONF           = 0.40
+YOLO_MARGIN         = 30
+YOLO_STALE_MAX      = 30
+YOLO_CLASS_NAME     = None
 
 # ════════════════════════════════════════════════════════════════
 # X11 window layout
@@ -250,39 +253,26 @@ class Ring:
 
 
 # ════════════════════════════════════════════════════════════════
-# YOLO Guard
+# YOLO Guard  (ใช้เฉพาะตอนยังไม่มี locked_tag_id)
 # ════════════════════════════════════════════════════════════════
 class YOLOGuard:
     """
     ใช้ YOLO detect bounding box ของ object ที่ AprilTag ติดอยู่
     AprilTag จะ trusted เฉพาะเมื่อ tag อยู่บริเวณ "ขอบบน" ของ YOLO bbox
 
-    เงื่อนไข is_tag_valid (AND ทั้งสอง):
-      1. x-range  : corners ทุกจุดอยู่ใน [x1-margin, x2+margin]
-      2. top-edge : centroid-y ของ tag อยู่ใน [y1-margin, y1+top_band]
-                    โดย top_band = bbox_height * TOP_BAND_RATIO
-                    (ค่า default 0.35 = อนุญาต tag ในช่วง 35% บนสุดของ bbox)
-
-    วิธีนี้ป้องกัน tag ผิดด้านซึ่งมักอยู่ต่ำกว่ากึ่งกลาง bbox
-
-    State:
-      bbox        : (x1, y1, x2, y2) หรือ None
-      bbox_age    : จำนวนเฟรมนับจาก YOLO detect ล่าสุด
-      yolo_ok     : bool — มี valid bbox อยู่หรือเปล่า
+    หลังจาก Tag ID Lock → YOLOGuard จะถูก bypass โดยสิ้นเชิง
     """
 
     def __init__(self, model_path: str, conf: float = YOLO_CONF,
                  margin: int = YOLO_MARGIN,
                  stale_max: int = YOLO_STALE_MAX,
-                 class_name: str | None = YOLO_CLASS_NAME,
-                 top_band_ratio: float = YOLO_TOP_BAND_RATIO):
-        self.conf           = conf
-        self.margin         = margin
-        self.stale_max      = stale_max
-        self.class_name     = class_name
-        self.top_band_ratio = top_band_ratio   # สัดส่วนความสูง bbox ที่ถือว่า "ด้านบน"
+                 class_name: str | None = YOLO_CLASS_NAME):
+        self.conf      = conf
+        self.margin    = margin
+        self.stale_max = stale_max
+        self.class_name = class_name
 
-        self.bbox      = None   # (x1, y1, x2, y2)
+        self.bbox      = None
         self.bbox_age  = 0
         self.yolo_ok   = False
         self.disabled  = False
@@ -300,10 +290,6 @@ class YOLOGuard:
             self.disabled = True
 
     def update(self, frame: np.ndarray) -> tuple | None:
-        """
-        รัน YOLO บน frame ปัจจุบัน
-        return: (x1, y1, x2, y2) ของ best detection หรือ None
-        """
         if self.disabled:
             return None
 
@@ -315,13 +301,10 @@ class YOLOGuard:
             for box in r.boxes:
                 cls_id = int(box.cls[0])
                 conf   = float(box.conf[0])
-
-                # กรอง class ถ้าระบุ class_name
                 if self.class_name is not None:
                     cls_name = self.model.names.get(cls_id, '')
                     if cls_name != self.class_name:
                         continue
-
                 if conf > best_conf:
                     best_conf = conf
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -340,7 +323,6 @@ class YOLOGuard:
         return self.bbox
 
     def tick(self):
-        """เรียกทุกเฟรมที่ไม่ได้รัน YOLO เพื่อนับ age"""
         if self.disabled:
             return
         self.bbox_age += 1
@@ -348,82 +330,60 @@ class YOLOGuard:
             self.bbox    = None
             self.yolo_ok = False
 
-    def is_tag_valid(self, corners: np.ndarray) -> tuple[bool, dict]:
+    def score_tag_proximity(self, corners: np.ndarray) -> tuple[float, dict]:
         """
-        ตรวจสอบว่า AprilTag อยู่บริเวณ "ขอบบน" ของ YOLO bbox
+        คำนวณ proximity score ของ AprilTag กับ YOLO bbox top-edge
 
-        corners: shape (4, 2) — pixel coordinates ของมุม tag (x, y)
-        return : (valid: bool, info: dict)
-                 info มี key: centroid_y, top_y, band_bottom, reason
+        แทนที่จะถามว่า "tag อยู่ใน bbox ไหม" → ถามว่า "tag อยู่ใกล้ขอบบนแค่ไหน"
 
-        เงื่อนไข (AND ทั้งสอง):
-          1. x-range  : corners ทุกจุดอยู่ใน [x1-m, x2+m]
-          2. top-edge : tag centroid-y อยู่ใน [y1-m, y1 + bbox_height * top_band_ratio + m]
-                        → ยอมรับเฉพาะ tag ที่ centroid อยู่ใน band บนสุดของ bbox
+        score = abs(centroid_y - y1)  pixels  (น้อย = ใกล้ top-edge = ดี)
+
+        x-range filter (ป้องกัน tag คนละด้านซ้าย/ขวา):
+          corners ทุกจุดต้องอยู่ใน [x1 - margin, x2 + margin]
+          ถ้าไม่ผ่าน → return inf
+
+        return: (score, info_dict)
         """
-        info = {'centroid_y': 0, 'top_y': 0, 'band_bottom': 0, 'reason': ''}
+        info = {'centroid_y': 0.0, 'top_y': 0.0, 'score': float('inf'), 'reason': ''}
 
         if self.disabled:
             info['reason'] = 'guard_disabled'
-            return True, info
+            return 0.0, info          # disabled → score 0 = ผ่านทุก tag, caller เลือกเอง
 
         if self.bbox is None:
             info['reason'] = 'no_bbox'
-            return False, info
+            return float('inf'), info
 
         x1, y1, x2, y2 = self.bbox
-        m            = self.margin
-        bbox_height  = max(y2 - y1, 1)
+        m = self.margin
 
-        # ── เงื่อนไข 1: x-range ─────────────────────────────────
+        # ── x-range filter ──────────────────────────────────────
         for cx, cy in corners:
             if not (x1 - m <= cx <= x2 + m):
-                info['reason'] = f'x_out cx={cx} range=[{x1-m},{x2+m}]'
-                return False, info
+                info['reason'] = f'x_out cx={cx:.0f} range=[{x1-m},{x2+m}]'
+                return float('inf'), info
 
-        # ── เงื่อนไข 2: top-edge (centroid) ────────────────────
-        centroid_y  = float(np.mean(corners[:, 1]))   # mean Y ของ 4 corners
-        band_bottom = y1 + bbox_height * self.top_band_ratio  # เส้นล่างของ "zone บน"
+        # ── proximity score ──────────────────────────────────────
+        centroid_y = float(np.mean(corners[:, 1]))
+        score      = abs(centroid_y - y1)
 
-        info['centroid_y']  = centroid_y
-        info['top_y']       = y1
-        info['band_bottom'] = band_bottom
-
-        if not (y1 - m <= centroid_y <= band_bottom + m):
-            info['reason'] = (
-                f'not_top_edge cy={centroid_y:.0f} '
-                f'zone=[{y1-m:.0f},{band_bottom+m:.0f}]'
-            )
-            return False, info
-
-        info['reason'] = 'ok'
-        return True, info
+        info['centroid_y'] = centroid_y
+        info['top_y']      = float(y1)
+        info['score']      = score
+        info['reason']     = 'ok'
+        return score, info
 
     def draw(self, frame: np.ndarray, color=(0, 180, 255)):
-        """วาด YOLO bbox + top-band zone บน frame"""
         if self.bbox is None:
             return
         x1, y1, x2, y2 = self.bbox
         col = color if self.yolo_ok else (80, 80, 80)
-
-        # วาด bbox ปกติ
         cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
         cv2.putText(frame, f"YOLO age={self.bbox_age}",
                     (x1, y1 - 6), _FONT, 0.35, col, 1)
-
-        # วาด top-band zone (พื้นที่สีเขียวอ่อนโปร่งแสง)
-        bbox_height = max(y2 - y1, 1)
-        band_bottom = int(y1 + bbox_height * self.top_band_ratio)
-        band_bottom = min(band_bottom, y2)
-
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x1, y1), (x2, band_bottom), (0, 255, 120), -1)
-        cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
-
-        # เส้นขอบล่างของ top-band
-        cv2.line(frame, (x1, band_bottom), (x2, band_bottom), (0, 220, 80), 1)
-        cv2.putText(frame, f"top {int(self.top_band_ratio*100)}%",
-                    (x1 + 2, band_bottom - 3), _FONT, 0.30, (0, 220, 80), 1)
+        # top-edge line = target zone (tag ที่ดีควรอยู่ใกล้เส้นนี้)
+        cv2.line(frame, (x1 - 6, y1), (x2 + 6, y1), (0, 255, 120), 2)
+        cv2.putText(frame, "TOP", (x2 + 8, y1 + 4), _FONT, 0.30, (0, 255, 120), 1)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -531,8 +491,9 @@ class AprilTagServo(Node):
 
         self.get_logger().info(
             f"AprilTag Servo (Laptop) | {self.W}×{self.H}"
-            f" | YOLO guard={'ON' if not self.yolo.disabled else 'OFF'}"
-            f" | YOLO every {YOLO_EVERY} frames"
+            f" | YOLO guard={'ON' if not self.yolo.disabled else 'OFF'} (pre-lock only)"
+            f" | Tag ID Lock: LOCK_LOST_MAX={LOCK_LOST_MAX}"
+            f" | target_tag_id={'AUTO (YOLO)' if self.target_tag_id < 0 else str(self.target_tag_id)}"
             f" | cmd={self._cmd_topic}")
 
     # ── Parameters ──────────────────────────────────────────────
@@ -547,8 +508,8 @@ class AprilTagServo(Node):
         d('max_linear',    0.40)
         d('max_angular',   0.60)
         d('cmd_topic',     '/cmd_vel_pid')
-        d('yolo_model',    'best.pt')   # path to YOLO model
-        # Camera intrinsics
+        d('yolo_model',    'best.pt')
+        d('target_tag_id', -1)   # -1 = ใช้ YOLO เลือกอัตโนมัติ, >=0 = ระบุ id ตรงๆ
         d('fx', 651.50491737); d('fy', 650.39077601)
         d('cx', 320.62707882); d('cy', 236.91812436)
         d('dist_k1',  0.21581633); d('dist_k2', -1.09508649)
@@ -565,8 +526,9 @@ class AprilTagServo(Node):
         self.tag_size    = g('tag_size').value
         self.max_linear  = g('max_linear').value
         self.max_angular = g('max_angular').value
-        self._cmd_topic  = g('cmd_topic').value
-        self._yolo_model = g('yolo_model').value
+        self._cmd_topic   = g('cmd_topic').value
+        self._yolo_model  = g('yolo_model').value
+        self.target_tag_id = int(g('target_tag_id').value)  # -1 = auto
         self.fx  = g('fx').value;  self.fy = g('fy').value
         self.cx0 = g('cx').value;  self.cy0 = g('cy').value
 
@@ -597,25 +559,20 @@ class AprilTagServo(Node):
             margin=YOLO_MARGIN,
             stale_max=YOLO_STALE_MAX,
             class_name=YOLO_CLASS_NAME,
-            top_band_ratio=YOLO_TOP_BAND_RATIO,
         )
 
     def _build_ros(self):
-        # Subscriber: รับภาพจาก Pi
         self.sub_img = self.create_subscription(
             CompressedImage,
             '/camera/image_raw/compressed',
             self._image_callback,
             10)
-
-        # Publishers
         self.cmd_pub      = self.create_publisher(Twist,            self._cmd_topic,               1)
         self.dbg_pub      = self.create_publisher(Float32MultiArray, '/vision_debug',               5)
         self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance',  5)
         self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',           5)
         self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',   5)
         self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',               1)
-
         self.bridge = CvBridge()
 
     def _init_state(self):
@@ -626,6 +583,9 @@ class AprilTagServo(Node):
         self.n_miss     = 0
         self.last_t     = None
         self.published  = False
+
+        # ── เก็บข้อมูล tag ล่าสุด สำหรับ publish ตอน STATE_DONE ──
+        self._last_tag_info = None  # dict: {ab, c, de, x, z, bearing}
 
         self._sframe    = 0
         self._last_wdir = 1.0
@@ -641,8 +601,16 @@ class AprilTagServo(Node):
         self._stuck_t   = None
         self._stuck_n   = 0
 
-        # YOLO guard tracking
-        self._yolo_frame = 0   # เฟรมนับสำหรับ YOLO interval
+        # YOLO guard frame counter (ใช้เฉพาะก่อน lock)
+        self._yolo_frame = 0
+
+        # ── Tag ID Lock ──────────────────────────────────────────
+        self.locked_tag_id    = None   # tag_id ที่ lock ไว้  (None = ยังไม่ lock)
+        self.lock_lost_frames = 0      # นับเฟรมที่หา locked tag ไม่เจอ
+
+        # ── Pre-lock confidence ───────────────────────────────────
+        self.prelock_id    = None  # tag_id ที่กำลัง accumulate
+        self.prelock_count = 0     # เห็นติดต่อกันกี่เฟรมแล้ว
 
     # ── X11 init ────────────────────────────────────────────────
     def _x11_init(self):
@@ -688,12 +656,15 @@ class AprilTagServo(Node):
         cv2.putText(cam, STATE_NAME.get(self.state, "?"),
             (6, 19), _FONT, 0.60, scol, 2)
 
-        # YOLO guard status overlay
-        yolo_status = "YOLO:OFF" if self.yolo.disabled else \
-                      f"YOLO:{'OK' if self.yolo.yolo_ok else 'STALE'} age={self.yolo.bbox_age}"
-        yolo_col = (80,80,80) if self.yolo.disabled else \
-                   ((0,220,120) if self.yolo.yolo_ok else (80,80,200))
-        cv2.putText(cam, yolo_status, (6, CAM_H - 8), _FONT, 0.35, yolo_col, 1)
+        # Lock status overlay
+        if self.locked_tag_id is not None:
+            lock_txt = f"LOCK: tag {self.locked_tag_id}  lost={self.lock_lost_frames}"
+            lock_col = (0, 255, 100)
+        else:
+            yolo_ok  = self.yolo.yolo_ok
+            lock_txt = f"SEARCHING  YOLO:{'OK' if yolo_ok else 'STALE'} age={self.yolo.bbox_age}"
+            lock_col = (0, 180, 255) if yolo_ok else (80, 80, 200)
+        cv2.putText(cam, lock_txt, (6, CAM_H - 8), _FONT, 0.35, lock_col, 1)
 
         canvas[0:CAM_H, 0:CAM_W] = cam
         draw_topview(canvas, CAM_W, 0,
@@ -767,7 +738,6 @@ class AprilTagServo(Node):
 
     # ── Image callback ──────────────────────────────────────────
     def _image_callback(self, msg: CompressedImage):
-        """รับภาพ compressed จาก Pi แล้วประมวลผล"""
         try:
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
             frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -776,33 +746,21 @@ class AprilTagServo(Node):
         except Exception as e:
             self.get_logger().warn(f"decode error: {e}", throttle_duration_sec=1.0)
             return
-
         self._process_frame(frame)
 
-    # ── AprilTag detection with YOLO guard ──────────────────────
+    # ── AprilTag detection with Tag ID Lock + YOLO guard ────────
     def _detect(self, frame):
         """
-        1. รัน YOLO ทุก YOLO_EVERY เฟรม เพื่ออัพเดท bbox
-        2. Detect AprilTag ทุกเฟรม
-        3. ยอมรับ tag เฉพาะที่ corners อยู่ใน YOLO bbox
+        Pipeline:
+          1. Undistort + detect AprilTag ทุกเฟรม
+          2. ถ้ามี locked_tag_id → ใช้เฉพาะ tag id นั้น (ข้าม YOLO)
+          3. ถ้ายังไม่มี lock → ใช้ YOLO guard กรอง → lock id ที่เลือก
+          4. เลือก tag ที่ใกล้สุด (pose_t[2] = z ต่ำสุด)
         """
         undist = cv2.undistort(frame, self.K, self.D, None, self.K_new)
         gray   = cv2.cvtColor(undist, cv2.COLOR_BGR2GRAY)
 
-        # ── YOLO guard update ────────────────────────────────────
-        self._yolo_frame += 1
-        if self._yolo_frame % YOLO_EVERY == 0:
-            self.yolo.update(frame)
-            self.get_logger().info(
-                f"[YOLO] update: bbox={self.yolo.bbox} ok={self.yolo.yolo_ok}",
-                throttle_duration_sec=0.5)
-        else:
-            self.yolo.tick()
-
-        # วาด YOLO bbox บน frame เสมอ (debug)
-        self.yolo.draw(frame)
-
-        # ── AprilTag detection ───────────────────────────────────
+        # ── AprilTag detection (ทุกเฟรม) ────────────────────────
         try:
             dets = self.detector.detect(
                 gray, estimate_tag_pose=True,
@@ -813,36 +771,175 @@ class AprilTagServo(Node):
             return None
 
         if not dets:
+            # ── ไม่เจอ tag เลย ──────────────────────────────────
+            if self.locked_tag_id is not None:
+                self.lock_lost_frames += 1
+                if self.lock_lost_frames > LOCK_LOST_MAX:
+                    self.get_logger().warn(
+                        f"[LOCK] tag {self.locked_tag_id} lost "
+                        f"{self.lock_lost_frames} frames → unlock")
+                    self.locked_tag_id    = None
+                    self.lock_lost_frames = 0
+                    self.prelock_id       = None   # reset pre-lock
+                    self.prelock_count    = 0
+                    # 🔴 force YOLO detect ทันทีตอน unlock
+                    self._yolo_frame = 0
+                    self.yolo.update(frame)
             return None
 
-        # ── YOLO guard: กรองเฉพาะ tag ที่อยู่บริเวณ top-edge ────
-        valid_dets = []
-        for det in dets:
-            corners = det.corners.astype(int)   # shape (4,2)
-            ok, info = self.yolo.is_tag_valid(corners)
-            if ok:
-                valid_dets.append(det)
+        # ════════════════════════════════════════════════════════
+        # BRANCH A: มี locked_tag_id → bypass YOLO
+        # ════════════════════════════════════════════════════════
+        if self.locked_tag_id is not None:
+            locked_dets = [d for d in dets if d.tag_id == self.locked_tag_id]
+
+            if locked_dets:
+                # เจอ tag ที่ lock ไว้ → reset lost counter
+                self.lock_lost_frames = 0
+                # เลือกอันใกล้สุด (z ต่ำสุด)
+                best = min(locked_dets, key=lambda d: float(d.pose_t[2]))
             else:
-                # วาด tag ที่ถูก reject ด้วยสีแดง + แสดงเหตุผล
+                # ไม่เจอ locked tag ในเฟรมนี้
+                self.lock_lost_frames += 1
+                if self.lock_lost_frames > LOCK_LOST_MAX:
+                    self.get_logger().warn(
+                        f"[LOCK] tag {self.locked_tag_id} lost "
+                        f"{self.lock_lost_frames} frames → unlock")
+                    self.locked_tag_id    = None
+                    self.lock_lost_frames = 0
+                    self.prelock_id       = None   # reset pre-lock
+                    self.prelock_count    = 0
+                    # 🔴 force YOLO detect ทันทีตอน unlock
+                    self._yolo_frame = 0
+                    self.yolo.update(frame)
+
+                    # วาด tag อื่นที่เห็นอยู่ (สีเหลือง = ยังไม่ trust)
+                    for det in dets:
+                        c = det.corners.astype(int)
+                        for i in range(4):
+                            cv2.line(frame, tuple(c[i]), tuple(c[(i+1)%4]),
+                                     (0, 200, 200), 1)
+                        cv2.putText(frame, f"WAIT id={det.tag_id}",
+                                    (c[0][0], c[0][1] - 4),
+                                    _FONT, 0.30, (0, 200, 200), 1)
+                return None
+
+        # ════════════════════════════════════════════════════════
+        # BRANCH B: ยังไม่มี lock → เลือก tag ตาม mode
+        # ════════════════════════════════════════════════════════
+        else:
+            # ── MODE 1: target_tag_id ระบุไว้ → ข้าม YOLO ─────────
+            if self.target_tag_id >= 0:
+                target_dets = [d for d in dets if d.tag_id == self.target_tag_id]
+                if not target_dets:
+                    # วาด tag อื่นที่เห็น (สีเทา = ไม่ใช่ target)
+                    for det in dets:
+                        c = det.corners.astype(int)
+                        for i in range(4):
+                            cv2.line(frame, tuple(c[i]), tuple(c[(i+1)%4]),
+                                     (60, 60, 60), 1)
+                        cv2.putText(frame, f"id={det.tag_id} (not target)",
+                                    (c[0][0], c[0][1] - 4), _FONT, 0.28, (60, 60, 60), 1)
+                    cv2.putText(frame, f"WAITING target id={self.target_tag_id}",
+                                (6, self.H - 30), _FONT, 0.40, (0, 140, 255), 1)
+                    return None
+                # เลือกอันใกล้สุดในบรรดา target dets
+                best = min(target_dets, key=lambda d: float(d.pose_t[2]))
+
+            # ── MODE 2: AUTO → ใช้ YOLO guard กรอง ────────────────
+            else:
+                # อัพเดท YOLO ทุก YOLO_EVERY เฟรม
+                self._yolo_frame += 1
+                if self._yolo_frame % YOLO_EVERY == 0:
+                    self.yolo.update(frame)
+                    self.get_logger().info(
+                        f"[YOLO] update: bbox={self.yolo.bbox} ok={self.yolo.yolo_ok}",
+                        throttle_duration_sec=0.5)
+                else:
+                    self.yolo.tick()
+
+                # วาด YOLO bbox (debug — เฉพาะตอน pre-lock)
+                self.yolo.draw(frame)
+
+                # คำนวณ score ทุก tag → เลือกอันที่ใกล้ top-edge มากสุด
+                scored = []
+                for det in dets:
+                    corners = det.corners.astype(int)
+                    score, info = self.yolo.score_tag_proximity(corners)
+                    # วาด score บน frame เพื่อ debug
+                    cx0, cy0 = int(corners[0][0]), int(corners[0][1])
+                    if score == float('inf'):
+                        # ไม่ผ่าน x-filter
+                        for i in range(4):
+                            cv2.line(frame, tuple(corners[i]),
+                                     tuple(corners[(i+1)%4]), (0, 0, 180), 1)
+                        cv2.putText(frame, f"x_out {info.get('reason','')}",
+                                    (cx0, cy0 - 4), _FONT, 0.28, (0, 60, 220), 1)
+                    else:
+                        scored.append((score, det))
+                        for i in range(4):
+                            cv2.line(frame, tuple(corners[i]),
+                                     tuple(corners[(i+1)%4]), (0, 180, 80), 1)
+                        cv2.putText(frame, f"score={score:.0f}px",
+                                    (cx0, cy0 - 4), _FONT, 0.28, (0, 220, 100), 1)
+
+                if not scored:
+                    cv2.putText(frame, "NO VALID TAG (x-filter)",
+                                (6, self.H - 30), _FONT, 0.40, (0, 60, 220), 1)
+                    return None
+
+                # tag ที่ score ต่ำสุด = centroid ใกล้ top-edge มากสุด
+                scored.sort(key=lambda t: t[0])
+                best = scored[0][1]
+                self.get_logger().info(
+                    f"[YOLO proximity] best id={best.tag_id}"
+                    f" score={scored[0][0]:.1f}px"
+                    f" (of {len(scored)} candidates)",
+                    throttle_duration_sec=0.3)
+
+            # ── Prelock: ต้องเห็น tag id เดิม PRELOCK_REQUIRED เฟรมติดต่อกัน ──
+            if self.prelock_id == best.tag_id:
+                self.prelock_count += 1
+            else:
+                # tag id เปลี่ยน → reset นับใหม่
+                if self.prelock_id is not None:
+                    self.get_logger().info(
+                        f"[PRELOCK] id changed {self.prelock_id}→{best.tag_id}"
+                        f"  reset count")
+                self.prelock_id    = best.tag_id
+                self.prelock_count = 1
+
+            self.get_logger().info(
+                f"[PRELOCK] id={self.prelock_id} count={self.prelock_count}"
+                f"/{PRELOCK_REQUIRED}",
+                throttle_duration_sec=0.2)
+
+            if self.prelock_count < PRELOCK_REQUIRED:
+                # ยังไม่ถึง threshold → วาด tag (สีส้ม = กำลัง accumulate) แต่ยังไม่ lock
+                corners_pre = best.corners.astype(int)
                 for i in range(4):
-                    cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1)%4]),
-                             (0, 0, 180), 1)
-                reason = info.get('reason', '')
-                cv2.putText(frame, f"REJECT:{reason}",
-                            (corners[0][0], corners[0][1] - 4),
-                            _FONT, 0.30, (0, 60, 220), 1)
+                    cv2.line(frame, tuple(corners_pre[i]),
+                             tuple(corners_pre[(i+1)%4]), (0, 140, 255), 2)
+                cv2.putText(frame,
+                    f"PRELOCK {self.prelock_count}/{PRELOCK_REQUIRED} id={self.prelock_id}",
+                    (corners_pre[0][0], corners_pre[0][1] - 4),
+                    _FONT, 0.32, (0, 140, 255), 1)
+                return None
 
-        if not valid_dets:
-            # วาด tag ที่ถูก detect แต่ทั้งหมด reject
-            if dets:
-                cv2.putText(frame, "NO VALID TAG (YOLO guard)",
-                            (6, self.H - 30), _FONT, 0.40, (0, 60, 220), 1)
-            return None
+            # ── ถึง threshold → lock จริง ────────────────────────
+            self.locked_tag_id    = best.tag_id
+            self.lock_lost_frames = 0
+            self.prelock_id       = None   # ล้างหลัง lock สำเร็จ
+            self.prelock_count    = 0
+            self.get_logger().info(
+                f"[LOCK] ✓ locked tag_id={self.locked_tag_id}"
+                f"  z={float(best.pose_t[2]):.3f}m"
+                f"  (confirmed {PRELOCK_REQUIRED} frames)")
 
-        # ── เลือก tag ที่ใหญ่สุด (closest) ─────────────────────
-        best     = max(valid_dets, key=lambda d: cv2.contourArea(d.corners.astype(int)))
+        # ════════════════════════════════════════════════════════
+        # ได้ best detection → คำนวณ pose
+        # ════════════════════════════════════════════════════════
         tx, _, tz = best.pose_t.flatten()
-
         x_m = float(tx) * (-1.0 if self.invert_x else 1.0)
         z_m = float(tz)
 
@@ -854,28 +951,27 @@ class AprilTagServo(Node):
         tag_id  = best.tag_id
         corners = best.corners.astype(int)
 
-        # วาด tag ที่ accepted
+        # วาด tag ที่ accepted (สีเขียวอมม่วง + แสดง LOCK)
+        lock_color = (0, 255, 120)
         for i in range(4):
-            cv2.line(frame, tuple(corners[i]), tuple(corners[(i+1)%4]), (255, 0, 255), 2)
+            cv2.line(frame, tuple(corners[i]),
+                     tuple(corners[(i+1)%4]), lock_color, 2)
         bearing = math.atan2(x_m, max(z_m, 0.05))
         cv2.putText(frame,
-            f"ID:{tag_id} x={x_m:+.3f}m z={z_m:.3f}m"
+            f"LOCK:{tag_id} x={x_m:+.3f}m z={z_m:.3f}m"
             f" bear={math.degrees(bearing):+.1f}° yaw={math.degrees(yaw):+.1f}°",
-            (6, self.H - 14), _FONT, 0.35, (255, 60, 255), 1)
+            (6, self.H - 14), _FONT, 0.35, lock_color, 1)
 
-        # ── Publish tag info (one-shot) ─────────────────────────
-        if self.n_stable >= STABLE_REQUIRED and not self.published:
-            ab = tag_id // 1000
-            c  = (tag_id // 100) % 10
-            de = tag_id % 100
-            self.plant_pub.publish(Int32(data=ab))
-            self.gap_pub.publish(Int32(data=c))
-            self.interval_pub.publish(Int32(data=de))
-            pm = Float32MultiArray()
-            pm.data = [x_m, 0.0, z_m, math.degrees(bearing)]
-            self.pose_pub.publish(pm)
-            self.published = True
-            self.get_logger().info(f"[Tag] AB={ab} C={c} DE={de} z={z_m:.3f}m")
+        # ── บันทึก tag info ไว้ publish ตอน STATE_DONE ────────────
+        bearing = math.atan2(x_m, max(z_m, 0.05))
+        self._last_tag_info = {
+            'ab':      tag_id // 1000,
+            'c':       (tag_id // 100) % 10,
+            'de':      tag_id % 100,
+            'x':       x_m,
+            'z':       z_m,
+            'bearing': bearing,
+        }
 
         self.last_t = self.get_clock().now()
         return x_m, z_m, yaw
@@ -900,7 +996,30 @@ class AprilTagServo(Node):
         if new_state in (STATE_ALIGN,):
             self.pid_y.reset()
         if new_state == STATE_SEARCH:
-            self.published = False
+            self.published        = False
+            # ── reset lock เมื่อกลับมา SEARCH ──────────────────
+            self.locked_tag_id    = None
+            self.lock_lost_frames = 0
+            self.get_logger().info("[LOCK] reset (back to SEARCH)")
+        if new_state == STATE_DONE and not self.published:
+            # ── publish ทุก topic ณ จุดหยุดจริง ─────────────────
+            info = self._last_tag_info
+            if info is not None:
+                # ใช้ z จาก smoother ณ ตอนนี้ (ค่าล่าสุดที่หยุด)
+                z_stop   = self.tag.z if self.tag.z is not None else info['z']
+                bearing_stop = math.atan2(info['x'], max(z_stop, 0.05))
+
+                self.plant_pub.publish(Int32(data=info['ab']))
+                self.gap_pub.publish(Int32(data=info['c']))
+                self.interval_pub.publish(Int32(data=info['de']))
+                pm = Float32MultiArray()
+                pm.data = [float(info['x']), 0.0, float(z_stop),
+                           float(math.degrees(bearing_stop))]
+                self.pose_pub.publish(pm)
+                self.published = True
+                self.get_logger().info(
+                    f"[DONE] published  AB={info['ab']} C={info['c']} DE={info['de']}"
+                    f"  z_stop={z_stop:.3f}m  bearing={math.degrees(bearing_stop):+.1f}°")
         if new_state == STATE_REVERSE:
             self._rv_t0 = self.get_clock().now().nanoseconds / 1e9
         if new_state == STATE_SCAN_BACK:
