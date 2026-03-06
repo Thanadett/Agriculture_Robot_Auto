@@ -36,48 +36,16 @@ void PlantingManager::begin() {
     pinMode(PIN_DIR, OUTPUT);
     pinMode(PIN_ENABLE, OUTPUT);
     ena_enable(); // เปิด Driver ทันที
-    // _currentPosSteps = 0; // home position at 0
-    // _targetPosSteps = 0;
     
     // set up Invert like before (TB6600)
     _stepper.setPinsInverted(true, true, false); 
-    // _stepper.setEnablePin(PIN_ENABLE); // use AccelStepper to manage ENA 
-    
+
     _stepper.setMaxSpeed(1200.0);      // velocity of SUGGESTED_SPS 
     _stepper.setAcceleration(600.0); // Acceleration 
     _stepper.setMinPulseWidth(20);      // TB6600 Pulse width
 
     _stepper.setCurrentPosition(0); // home position at 0
     servo_plate.writeMicroseconds(angleToUs(HomeAngle));}
-
-// void PlantingManager::runStepper() {
-//     if (_currentPosSteps == _targetPosSteps) {
-//         _isStepping = false;
-//         return;
-//     }
-
-//     _isStepping = true;
-//     unsigned long now = micros();
-    
-//     // use STEP_DELAY_US from config.h Ex. 500, 800)
-//     if (now - _lastStepMicros >= STEP_DELAY_US) {
-//         _lastStepMicros = now;
-
-//         // define direction
-//         if (_targetPosSteps > _currentPosSteps) {
-//             digitalWrite(PIN_DIR, HIGH);
-//             _currentPosSteps++;
-//         } else {
-//             digitalWrite(PIN_DIR, LOW);
-//             _currentPosSteps--;
-//         }
-
-//         // create pulse (Bit-banging single pulse)
-//         digitalWrite(PIN_STEP, HIGH);
-//         delayMicroseconds(5); // small pulse to prevent blocking
-//         digitalWrite(PIN_STEP, LOW);
-//     }
-// }
 
 void PlantingManager::startPlantPattern() {
     if (_activeMode == IDLE) {
@@ -114,6 +82,14 @@ void PlantingManager::mv_cam_up_pattern() {
 void PlantingManager::mv_cam_down_pattern() {
     if (_activeMode == IDLE) {
         _activeMode = MOVECAM_DOWN;
+        _currentStep = 1;
+        _previous_Millis = millis();
+    }
+}
+
+void PlantingManager::resetPattern() {
+    if (_activeMode == IDLE) {
+        _activeMode = RESET;
         _currentStep = 1;
         _previous_Millis = millis();
     }
@@ -564,6 +540,34 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
+                    _currentStep = 0;
+                    _activeMode = IDLE;
+                    break;
+            }
+            break;
+        case RESET:
+            switch (_currentStep) {
+                case 1: // 
+                    servo_cam.write(0);
+                    servo_gripper.write(160);
+                    servo_cam.write(0);
+                    servo_linear.write(moveToAngle(0, 270));
+                    servo_plate.writeMicroseconds(angleToUs(HomeAngle));
+                    if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
+                    break;
+                case 2:
+                    if (!_stepperCommandSent) {
+                        _stepper.moveTo(mmToSteps(0.0));
+                        _stepperCommandSent = true;
+                    }
+
+                    if (_stepper.distanceToGo() == 0) {
+                        _stepperCommandSent = false;
+                        _currentStep++;
+                        _previous_Millis = currentMillis;
+                    }
+                    break;
+                case 3:
                     _currentStep = 0;
                     _activeMode = IDLE;
                     break;
