@@ -47,7 +47,7 @@ def generate_launch_description():
         }],
     )
 
-    heading_pid = Node(
+    heading_pid_node = Node(
         package='robot_bringup',
         executable='heading_pid_node',
         name='heading_pid_node',
