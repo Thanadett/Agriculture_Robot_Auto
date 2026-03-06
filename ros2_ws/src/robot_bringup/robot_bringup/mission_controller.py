@@ -58,15 +58,15 @@ MS_APPROACH      = 2   # เดินหน้าจนกล้องห่า�
 MS_REVERSE       = 3   # ถอยหลัง reverse_after_m
 MS_WAIT_REVERSE  = 4   # หยุดรอหลังถอย
 MS_PLANT_1       = 5   # เดินหน้า planting_distance
-MS_WAIT_1        = 6   # หยุด → pub DONE:1
+MS_WAIT_1        = 6   # หยุด → pub DONE:planting
 MS_PLANT_2       = 7   # เดินหน้า planting_distance
-MS_WAIT_2        = 8   # หยุด → pub DONE:2
+MS_WAIT_2        = 8   # หยุด → pub DONE:planting
 MS_GAP           = 9   # เดินหน้า gap_type
-MS_WAIT_3        = 10  # หยุด → pub DONE:3
+MS_WAIT_3        = 10  # หยุด → pub DONE:cabbage
 MS_INTERVAL_1    = 11  # เดินหน้า cabbage_interval
-MS_WAIT_4A       = 12  # หยุด → pub DONE:4
+MS_WAIT_4A       = 12  # หยุด → pub DONE:cabbage
 MS_INTERVAL_2    = 13  # เดินหน้า cabbage_interval
-MS_WAIT_4B       = 14  # หยุด → pub DONE:4
+MS_WAIT_4B       = 14  # หยุด → pub DONE:cabbage
 MS_FINISH        = 15  # pub FINISH แล้วจบ
 
 MS_NAME = {
@@ -358,7 +358,7 @@ class MissionController(Node):
             if self._travelled_m() >= self._target_m:
                 self._go(MS_WAIT_1)
                 self._start_wait()
-                self._pub_msg("DONE:1")
+                self._pub_msg("DONE:planting")
             else:
                 self._forward()
 
@@ -376,7 +376,7 @@ class MissionController(Node):
             if self._travelled_m() >= self._target_m:
                 self._go(MS_WAIT_2)
                 self._start_wait()
-                self._pub_msg("DONE:2")
+                self._pub_msg("DONE:planting")
             else:
                 self._forward()
 
@@ -394,7 +394,7 @@ class MissionController(Node):
             if self._travelled_m() >= self._target_m:
                 self._go(MS_WAIT_3)
                 self._start_wait()
-                self._pub_msg("DONE:3")
+                self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
@@ -412,7 +412,7 @@ class MissionController(Node):
             if self._travelled_m() >= self._target_m:
                 self._go(MS_WAIT_4A)
                 self._start_wait()
-                self._pub_msg("DONE:4")
+                self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
@@ -430,7 +430,7 @@ class MissionController(Node):
             if self._travelled_m() >= self._target_m:
                 self._go(MS_WAIT_4B)
                 self._start_wait()
-                self._pub_msg("DONE:4")
+                self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
