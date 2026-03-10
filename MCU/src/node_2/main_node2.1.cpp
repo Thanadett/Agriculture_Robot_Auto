@@ -9,6 +9,7 @@
 
 #include "CtrlManager.h"
 
+
 // ตัวแปรสำหรับกลไก
 PlantingManager robot;
 //docker run -it --rm -v /dev:/dev --privileged --net=host -e ROS_DOMAIN_ID=69 microros/micro-ros-agent:jazzy serial --dev /dev/ttyUSB0 -b 115200
@@ -73,7 +74,9 @@ void vision_callback(const void * msgin) {
   const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msgin;
   if (msg->data.size > 0) {
     vision_state_val = msg->data.data[0]; // รับค่าตัวที่ 0 (state)
-    // Serial.print("Vision State: "); Serial.println(vision_state_val);
+    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE) {
+      pending_cmd = CMD_CAMUP;
+    }
   }
 }
 
@@ -100,9 +103,6 @@ void command_callback(const void * msgin) {
   }
   else if (cmd == "DONE:planting2") {
     pending_cmd = CMD_PLANT2;
-  }
-  else if (vision_state_val == 4.0f) {
-    pending_cmd = CMD_CAMUP;
   }
 }
 
@@ -166,7 +166,7 @@ void loop() {
 
   if (state == AGENT_CONNECTED) {
 
-    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(20));
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(50));
 
     if (pending_cmd != CMD_NONE) {
 
@@ -177,19 +177,19 @@ void loop() {
         publish_feedback("resetting system");
         robot.resetPattern();
         waitRobotStop();
-        publish_feedback("success");
+        publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_STOP) {
         robot.stopAll();
-        publish_feedback("success");
+        publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_PLANT1) {
         publish_feedback("planting");
         robot.testpattern();
         waitRobotStop();
-        publish_feedback("success");
+        publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_PLANT2) {
@@ -201,14 +201,14 @@ void loop() {
         robot.testpattern();
         waitRobotStop();
 
-        publish_feedback("success");
+        publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_CAMUP) {
         publish_feedback("moving camera up");
         robot.mv_cam_up_pattern();
         waitRobotStop();
-        publish_feedback("success");
+        publish_feedback("SUCCESS");
       }
     }
 

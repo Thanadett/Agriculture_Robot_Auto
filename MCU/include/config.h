@@ -105,7 +105,6 @@ static constexpr float GYRO_SENS_250 = 131.0f;   // LSB/(deg/s)
 #define SERVO_PIN_plate 17
 #define SERVO_PIN_cam 14
 
-#define SERVO_PIN_cam 21 //edit later
 #define SERVO_MIN_PULSE 500
 #define SERVO_MAX_PULSE 2500
 
