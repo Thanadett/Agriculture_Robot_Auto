@@ -4,7 +4,7 @@
 #include <AccelStepper.h>
 #include "config.h"
 
-enum TaskMode { IDLE, PLANTING, LOADING, TESTING, MOVECAM_UP, MOVECAM_DOWN };
+enum TaskMode { IDLE, PLANTING, LOADING, TESTING, MOVECAM_UP, MOVECAM_DOWN, RESET };
 class PlantingManager {
 private:
     TaskMode _activeMode = IDLE;
@@ -41,6 +41,8 @@ public:
     
     int getCurrentStep() { return _currentStep; }
     bool isBusy() { return _activeMode != IDLE; }
+    bool isIDLE() { return _activeMode == IDLE; }
+
 
     long mmToSteps(float StepPermm);
     int angleToUs(float Angle); //for MG996R on plant plate
@@ -52,6 +54,7 @@ public:
     void testpattern();
     void mv_cam_up_pattern();
     void mv_cam_down_pattern();
+    void resetPattern();
     void update(); // call in loop()
     void stopAll(); // for Emergency Stop
 };

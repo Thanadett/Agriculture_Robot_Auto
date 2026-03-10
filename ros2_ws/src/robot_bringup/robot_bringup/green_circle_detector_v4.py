@@ -1,17 +1,13 @@
 """
 Green Circle Detector v3 — วงกลมกลวง (ขอบสีเขียวเท่านั้น)
 ===========================================================
-[แก้ไข] ประมวลผลทุก 5 เฟรม + แสดงเฉพาะวงกลมที่มีรัศมี >= 10 cm
-        โดยกล้องอยู่ห่าง 39 cm (ใช้ focal length ประมาณ 600 px สำหรับ webcam ทั่วไป)
-
-วิธีคำนวณ px → cm:
-  px_per_cm = FOCAL_LENGTH_PX / CAMERA_DISTANCE_CM
-  radius_cm = radius_px / px_per_cm
+[แก้ไข] ประมวลผลทุก 5 เฟรม + แสดงเฉพาะวงกลมที่มีเส้นผ่านศูนย์กลาง >= 20 cm
+        โดยกล้องอยู่ห่าง 28 cm
+        - PX_PER_CM = 21.62 (วัดจากวัตถุจริง diameter=15.91cm, radius=172px)
+        - แสดงผลเป็นเส้นผ่านศูนย์กลาง (d) แทนรัศมี (r)
+        - ใช้ float แทน int ในการคำนวณทั้งหมด
+        - แคปภาพเฉพาะวัตถุที่มีเส้นผ่านศูนย์กลาง >= MIN_RADIUS_CM*2
 """
-
-# Use the 'by-path' link instead of a number
-# cam_path = "/dev/v4l/by-path/platform-xhci-hcd.0-usbv2-0:2.3:1.0-video-index0"
-# cap = cv2.VideoCapture(cam_path)
 
 import cv2
 import numpy as np
@@ -35,24 +31,26 @@ CAPTURE_COOLDOWN   = 1.0    # วินาที
 
 # ── พารามิเตอร์ระยะทางและขนาด ──
 FOCAL_LENGTH_PX    = 600    # px  ← วัดที่ความละเอียด REFERENCE_WIDTH (640px)
-CAMERA_DISTANCE_CM = 39     # cm  ← ระยะจากกล้องถึงวัตถุ
-MIN_RADIUS_CM      = 5      # cm  ← รัศมีขั้นต่ำที่จะแสดง/บันทึก
+CAMERA_DISTANCE_CM = 28     # cm  ← ระยะจากกล้องถึงวัตถุ
+MIN_RADIUS_CM      = 5     # cm  ← รัศมีขั้นต่ำ (diameter >= 20cm)
 
-# ── [แก้ไข] ความละเอียดของกล้อง ──
+# ── ความละเอียดของกล้อง ──
 CAPTURE_WIDTH      = 160    # px  ← ความกว้างที่ใช้จริง
 CAPTURE_HEIGHT     = 120    # px  ← ความสูงที่ใช้จริง
 REFERENCE_WIDTH    = 640    # px  ← ความกว้างที่วัด FOCAL_LENGTH_PX มา
 
-# ── [แก้ไข] scale focal length ตามความละเอียดจริง แล้วคำนวณ px_per_cm ──
-# เมื่อภาพเล็กลง 1/4 วัตถุมีขนาด px น้อยลงด้วย → focal length ต้อง scale ตาม
-FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH) # ควรเป็น 45.24
-PX_PER_CM = 1.16
-# PX_PER_CM           = FOCAL_LENGTH_SCALED / CAMERA_DISTANCE_CM 
-# ควรเป็น 1.16
-MIN_CAPTURE_RADIUS  = int(MIN_RADIUS_CM * PX_PER_CM / 2)  # รัศมีขั้นต่ำหน่วย px
+FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
+
+# ── PX_PER_CM คำนวณจากการวัดจริง ──
+# วัตถุจริง diameter=15.91cm → radius=7.955cm, วัดได้ radius=172px
+# PX_PER_CM = 172 / 7.955 = 21.62
+PX_PER_CM = 22.51   # px/cm — hardcode จากการวัดจริง
+
+# MIN_CAPTURE_RADIUS เก็บเป็น float
+MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # รัศมีขั้นต่ำหน่วย px (float)
 
 # ── ประมวลผลทุก N เฟรม ──
-PROCESS_EVERY_N_FRAMES = 5  # ← ตรวจจับทุก 5 เฟรม
+PROCESS_EVERY_N_FRAMES = 5
 
 
 # ══════════════════════════════════════════════════════════════
@@ -146,10 +144,11 @@ def ransac_circle(xs, ys, n_iter=300, tol=2.5, min_inliers=8):
             cx_r, cy_r = -D/2, -E/2
             r_r = np.sqrt(max(cx_r**2 + cy_r**2 - F, 0))
             if r_r > 5:
-                return cx_r, cy_r, r_r, int(mask.sum())
+                # คืนค่าเป็น float ทั้งหมด ไม่ปัดเป็น int
+                return float(cx_r), float(cy_r), float(r_r), int(mask.sum())
         except Exception:
             pass
-    return best[0], best[1], best[2], best_n
+    return float(best[0]), float(best[1]), float(best[2]), best_n
 
 
 # ══════════════════════════════════════════════════════════════
@@ -216,8 +215,8 @@ def detect_green_circles(bgr_img,
         if result is None:
             continue
 
+        # เก็บเป็น float ทั้งหมด ไม่ปัดเป็น int
         ccx, ccy, cr, n_in = result
-        ccx, ccy, cr = int(round(ccx)), int(round(ccy)), int(round(cr))
 
         if not (min_radius <= cr <= max_radius):
             continue
@@ -268,16 +267,19 @@ def draw_centerline_overlay(frame, circles, center_x, last_captured):
         ncx, ncy, nr, _ = nearest
         passes = nr >= MIN_CAPTURE_RADIUS
         ring_color = (0, 220, 60) if passes else (0, 60, 220)
-        cv2.circle(frame, (ncx, ncy), nr, ring_color, 3)
-        cv2.circle(frame, (ncx, ncy), 4, ring_color, -1)
 
-        lx = max(0, ncx - nr)
-        ly = max(15, ncy - nr - 32)
+        # แปลง int เฉพาะตอนส่งให้ OpenCV วาด
+        icx, icy, ir = int(round(ncx)), int(round(ncy)), int(round(nr))
+        cv2.circle(frame, (icx, icy), ir, ring_color, 3)
+        cv2.circle(frame, (icx, icy), 4, ring_color, -1)
+
+        lx = max(0, icx - ir)
+        ly = max(15, icy - ir - 32)
         status_icon = "✓" if passes else "✗"
-        r_cm = px_to_cm(nr)
-        cv2.putText(frame, f"r = {nr}px ({r_cm:.1f}cm) {status_icon}",
+        d_cm = px_to_cm(nr) * 2  # เส้นผ่านศูนย์กลาง
+        cv2.putText(frame, f"d = {nr*2:.1f}px ({d_cm:.2f}cm) {status_icon}",
                     (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, ring_color, 2)
-        cv2.putText(frame, f"min={MIN_RADIUS_CM}cm ({MIN_CAPTURE_RADIUS}px)",
+        cv2.putText(frame, f"min={MIN_RADIUS_CM*2}cm ({MIN_CAPTURE_RADIUS*2:.1f}px)",
                     (lx, ly+20), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180,180,180), 1)
 
     return frame
@@ -286,25 +288,29 @@ def draw_centerline_overlay(frame, circles, center_x, last_captured):
 def draw_capture_annotation(frame, cx, cy, cr, center_x):
     out = frame.copy()
     h, w = out.shape[:2]
-    cv2.line(out, (center_x, 0), (center_x, h), (0, 80, 255), 2)
-    cv2.circle(out, (cx, cy), cr+2, (255, 255, 255), 4)
-    cv2.circle(out, (cx, cy), cr,   (255, 160, 0),   2)
-    cv2.line(out, (cx, cy), (cx+cr, cy), (0, 255, 255), 1)
-    ch = 10
-    cv2.line(out, (cx-ch, cy), (cx+ch, cy), (0,255,255), 2)
-    cv2.line(out, (cx, cy-ch), (cx, cy+ch), (0,255,255), 2)
-    cv2.circle(out, (cx, cy), 4, (0,255,255), -1)
 
-    bx1, by1 = max(0, cx-cr-6), max(0, cy-cr-6)
-    bx2, by2 = min(w-1, cx+cr+6), min(h-1, cy+cr+6)
+    # แปลง int เฉพาะตอนส่งให้ OpenCV วาด
+    icx, icy, icr = int(round(cx)), int(round(cy)), int(round(cr))
+
+    cv2.line(out, (center_x, 0), (center_x, h), (0, 80, 255), 2)
+    cv2.circle(out, (icx, icy), icr+2, (255, 255, 255), 4)
+    cv2.circle(out, (icx, icy), icr,   (255, 160, 0),   2)
+    cv2.line(out, (icx-icr, icy), (icx+icr, icy), (0, 255, 255), 1)  # เส้น diameter
+    ch = 10
+    cv2.line(out, (icx-ch, icy), (icx+ch, icy), (0,255,255), 2)
+    cv2.line(out, (icx, icy-ch), (icx, icy+ch), (0,255,255), 2)
+    cv2.circle(out, (icx, icy), 4, (0,255,255), -1)
+
+    bx1 = max(0, icx-icr-6);  by1 = max(0, icy-icr-6)
+    bx2 = min(w-1, icx+icr+6); by2 = min(h-1, icy+icr+6)
     cv2.rectangle(out, (bx1, by1), (bx2, by2), (200,200,200), 1)
 
     label_y = max(20, by1-8)
-    r_cm = px_to_cm(cr)
+    d_cm = px_to_cm(cr) * 2  # เส้นผ่านศูนย์กลาง
     for color, thickness in [((255,255,255),3), ((255,160,0),2)]:
-        cv2.putText(out, f"r = {cr}px ({r_cm:.1f} cm)",
+        cv2.putText(out, f"d = {cr*2:.1f}px ({d_cm:.2f} cm)",
                     (bx1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, thickness)
-    cv2.putText(out, f"center ({cx}, {cy})",
+    cv2.putText(out, f"center ({cx:.1f}, {cy:.1f})",
                 (bx1, label_y+22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200,200,200), 1)
     cv2.putText(out, time.strftime("%Y-%m-%d  %H:%M:%S"),
                 (8, h-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180,180,180), 1)
@@ -317,11 +323,14 @@ def check_and_capture(frame, circles, center_x, last_captured, cap_counter):
     for c in circles:
         cx, cy, cr, _ = c
         if abs(cx - center_x) <= CENTER_TOL:
+            d_cm = px_to_cm(cr) * 2  # เส้นผ่านศูนย์กลาง
+
+            # ── เงื่อนไขหลัก: เส้นผ่านศูนย์กลางต้องไม่น้อยกว่า MIN_RADIUS_CM*2 ──
             if cr < MIN_CAPTURE_RADIUS:
-                r_cm = px_to_cm(cr)
-                print(f"  [SKIP] r={cr}px ({r_cm:.1f}cm) < {MIN_RADIUS_CM}cm ไม่บันทึก")
+                print(f"  [SKIP] d={cr*2:.1f}px ({d_cm:.2f}cm) < {MIN_RADIUS_CM*2}cm ไม่บันทึก")
                 continue
-            key = f"{cx}_{cy}_{cr}"
+
+            key = f"{cx:.1f}_{cy:.1f}_{cr:.1f}"
             if now - last_captured.get(key, 0) >= CAPTURE_COOLDOWN:
                 annotated = draw_capture_annotation(frame, cx, cy, cr, center_x)
                 ensure_save_dir()
@@ -330,12 +339,11 @@ def check_and_capture(frame, circles, center_x, last_captured, cap_counter):
                 filename = os.path.join(SAVE_DIR, f"circle_{ts}_{cap_counter[0]:04d}.png")
                 cv2.imwrite(filename, annotated)
                 last_captured[key] = now
-                r_cm = px_to_cm(cr)
                 print(f"\n{'='*50}")
                 print(f"  [CAPTURE] วงกลมสัมผัสเส้นกลาง!")
                 print(f"  ไฟล์    : {filename}")
-                print(f"  ตำแหน่ง : center=({cx}, {cy})")
-                print(f"  รัศมี   : {cr}px = {r_cm:.1f} cm ✓")
+                print(f"  ตำแหน่ง : center=({cx:.1f}, {cy:.1f})")
+                print(f"  เส้นผ่านศูนย์กลาง : {cr*2:.1f}px = {d_cm:.2f} cm ✓")
                 print(f"{'='*50}")
                 captured = True
     return captured
@@ -343,27 +351,30 @@ def check_and_capture(frame, circles, center_x, last_captured, cap_counter):
 
 def draw_overlay(frame, circles, frame_num):
     for cx, cy, r, _ in circles:
-        r_cm = px_to_cm(r)
+        d_cm = px_to_cm(r) * 2  # เส้นผ่านศูนย์กลาง
         passes = r >= MIN_CAPTURE_RADIUS
 
+        # แปลง int เฉพาะตอนส่งให้ OpenCV วาด
+        icx, icy, ir = int(round(cx)), int(round(cy)), int(round(r))
+
         if passes:
-            cv2.circle(frame, (cx, cy), r, (0, 255, 0), 2)
-            cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+            cv2.circle(frame, (icx, icy), ir, (0, 255, 0), 2)
+            cv2.circle(frame, (icx, icy), 6, (0, 0, 255), -1)
             ch = 12
-            cv2.line(frame, (cx-ch, cy), (cx+ch, cy), (0, 255, 255), 1)
-            cv2.line(frame, (cx, cy-ch), (cx, cy+ch), (0, 255, 255), 1)
-            label = f"r={r}px ({r_cm:.1f}cm)"
+            cv2.line(frame, (icx-ch, icy), (icx+ch, icy), (0, 255, 255), 1)
+            cv2.line(frame, (icx, icy-ch), (icx, icy+ch), (0, 255, 255), 1)
+            label = f"d={r*2:.1f}px ({d_cm:.2f}cm)"
             cv2.putText(frame, label,
-                        (max(0, cx-r), max(15, cy-r-6)),
+                        (max(0, icx-ir), max(15, icy-ir-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 2)
         else:
-            cv2.circle(frame, (cx, cy), r, (120, 120, 120), 1)
-            cv2.putText(frame, f"r={r_cm:.1f}cm<{MIN_RADIUS_CM}cm",
-                        (max(0, cx-r), max(15, cy-r-6)),
+            cv2.circle(frame, (icx, icy), ir, (120, 120, 120), 1)
+            cv2.putText(frame, f"d={d_cm:.2f}cm<{MIN_RADIUS_CM*2}cm",
+                        (max(0, icx-ir), max(15, icy-ir-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 120, 120), 1)
 
     valid_count = sum(1 for c in circles if c[2] >= MIN_CAPTURE_RADIUS)
-    info = (f"Circles(>={MIN_RADIUS_CM}cm): {valid_count}/{len(circles)}"
+    info = (f"Circles(>={MIN_RADIUS_CM*2}cm diam): {valid_count}/{len(circles)}"
             f"  Frame:{frame_num}  Q=quit  S=shot  M=mask")
     cv2.putText(frame, info, (8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
@@ -374,11 +385,12 @@ def visualize_static(bgr_img, circles, green_mask, combined,
                      debug_info=None, save_path=None):
     out = bgr_img.copy()
     for cx, cy, r, n_in in circles:
-        r_cm = px_to_cm(r)
-        cv2.circle(out, (cx, cy), r, (0, 0, 255), 2)
-        cv2.circle(out, (cx, cy), 4, (255, 0, 0), -1)
-        cv2.putText(out, f"r={r}px ({r_cm:.1f}cm)",
-                    (max(0, cx-r), max(15, cy-r-6)),
+        d_cm = px_to_cm(r) * 2
+        icx, icy, ir = int(round(cx)), int(round(cy)), int(round(r))
+        cv2.circle(out, (icx, icy), ir, (0, 0, 255), 2)
+        cv2.circle(out, (icx, icy), 4, (255, 0, 0), -1)
+        cv2.putText(out, f"d={r*2:.1f}px ({d_cm:.2f}cm)",
+                    (max(0, icx-ir), max(15, icy-ir-6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
 
     ncols = 4 if debug_info else 3
@@ -409,16 +421,13 @@ def visualize_static(bgr_img, circles, green_mask, combined,
 # ══════════════════════════════════════════════════════════════
 #  H. CAMERA MODE
 # ══════════════════════════════════════════════════════════════
-def run_camera(camera_index=0, hog_thresh=0.50, edge_thickness=6,
+def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
                min_radius=15, max_radius=500, show_mask=False):
-    # cap = cv2.VideoCapture(camera_index)
-    cam_path = "/dev/v4l/by-path/platform-xhci-hcd.0-usb-0:2.3:1.0-video-index0"
-    cap = cv2.VideoCapture(cam_path)
+    cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
         print(f"[ERROR] ไม่สามารถเปิดกล้อง index={camera_index}")
         sys.exit(1)
 
-    # ── [แก้ไข] ลดความละเอียดเป็น 160×120 ──
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
 
@@ -428,12 +437,12 @@ def run_camera(camera_index=0, hog_thresh=0.50, edge_thickness=6,
     ensure_save_dir()
 
     print("=" * 60)
-    print(" Green Circle Detector v3 — Live Camera")
+    print(" Green Circle Detector v4 — Live Camera")
     print(f" ความละเอียด    = {CAPTURE_WIDTH}×{CAPTURE_HEIGHT} px")
     print(f" FOCAL_LENGTH   = {FOCAL_LENGTH_PX} px (ref@{REFERENCE_WIDTH}px → scaled={FOCAL_LENGTH_SCALED:.1f}px)")
     print(f" DISTANCE       = {CAMERA_DISTANCE_CM} cm")
-    print(f" PX_PER_CM      = {PX_PER_CM:.2f} px/cm")
-    print(f" MIN_RADIUS     = {MIN_RADIUS_CM} cm  ({MIN_CAPTURE_RADIUS} px)")
+    print(f" PX_PER_CM      = {PX_PER_CM:.4f} px/cm  (วัดจากวัตถุจริง)")
+    print(f" MIN_DIAMETER   = {MIN_RADIUS_CM*2} cm  ({MIN_CAPTURE_RADIUS*2:.2f} px)")
     print(f" ประมวลผลทุก    = {PROCESS_EVERY_N_FRAMES} เฟรม")
     print(f" บันทึกภาพไปที่ : ./{SAVE_DIR}/")
     print(" Q / ESC : ออก    S : screenshot    M : toggle mask")
@@ -499,7 +508,7 @@ def run_camera(camera_index=0, hog_thresh=0.50, edge_thickness=6,
             cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-        cv2.imshow("Green Circle Detector v3", disp)
+        cv2.imshow("Green Circle Detector v4", disp)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q'), 27):
@@ -526,9 +535,16 @@ def main():
     global CAPTURE_WIDTH, CAPTURE_HEIGHT, FOCAL_LENGTH_SCALED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v3 — วงกลมกลวงขอบสีเขียว"
+        description="Green Circle Detector v4 — วงกลมกลวงขอบสีเขียว"
     )
-    parser.add_argument("--camera",    type=int,   default=None, metavar="INDEX")
+    # สร้างฟังก์ชันเช็คเพื่อรองรับทั้ง int และ string
+    def camera_input(value):
+        try:
+            return int(value) # ถ้าเป็นตัวเลข (0, 1, 2) ให้ส่งกลับเป็น int
+        except ValueError:
+            return value      # ถ้าไม่ใช่ตัวเลข (เช่น /dev/webcam_...) ให้ส่งกลับเป็น string
+
+    parser.add_argument("--camera", type=camera_input, default="/dev/webcam_EYD_1080p", metavar="PATH_OR_INDEX")
     parser.add_argument("--image",     default=None)
     parser.add_argument("--save",      default=None)
     parser.add_argument("--threshold", type=float, default=0.50)
@@ -545,6 +561,8 @@ def main():
                         help=f"ความกว้างภาพ px (default={CAPTURE_WIDTH})")
     parser.add_argument("--height",    type=int,   default=CAPTURE_HEIGHT,
                         help=f"ความสูงภาพ px (default={CAPTURE_HEIGHT})")
+    parser.add_argument("--px-per-cm", type=float, default=PX_PER_CM,
+                        help=f"ค่า px/cm จากการ calibrate (default={PX_PER_CM})")
     args = parser.parse_args()
 
     random.seed(0)
@@ -556,10 +574,9 @@ def main():
     CAPTURE_HEIGHT         = args.height
     PROCESS_EVERY_N_FRAMES = args.every
 
-    # ── [แก้ไข] scale focal length ตามความละเอียดจริงก่อนคำนวณ px_per_cm ──
     FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
-    PX_PER_CM           = FOCAL_LENGTH_SCALED / CAMERA_DISTANCE_CM
-    MIN_CAPTURE_RADIUS  = int(MIN_RADIUS_CM * PX_PER_CM / 2)
+    PX_PER_CM           = args.px_per_cm           # ใช้ค่าจาก argument หรือ default 21.62
+    MIN_CAPTURE_RADIUS  = MIN_RADIUS_CM * PX_PER_CM  # float ไม่ต้อง int()
 
     if args.camera is not None:
         run_camera(camera_index=args.camera,
@@ -590,8 +607,8 @@ def main():
 
     print(f"\nDetected {len(circles)} circle(s):")
     for i, (cx, cy, r, n_in) in enumerate(circles, 1):
-        r_cm = px_to_cm(r)
-        print(f"  [{i}] center=({cx},{cy})  radius={r}px ({r_cm:.1f}cm)  inliers={n_in}")
+        d_cm = px_to_cm(r) * 2
+        print(f"  [{i}] center=({cx:.1f},{cy:.1f})  diameter={r*2:.1f}px ({d_cm:.2f}cm)  inliers={n_in}")
 
     visualize_static(bgr, circles, gmask, combined,
                      debug_info=dbg if args.debug else None,
