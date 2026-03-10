@@ -31,6 +31,13 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
+#v4l2-ctl --list-devices find which one is the pi camera, then set camera_id param accordingly (default=0)
+"""
+ถ้าใช้กล้อง USB หลายตัวบน Pi อาจเจอปัญหา camera index สลับไปมาเมื่อรีบูตเครื่อง แนะนำให้ตั้ง udev rule ให้กล้องแต่ละตัวมี symlink ชื่อคงที่ 
+sudo nano /etc/udev/rules.d/99-usb-cameras.rules
+SUBSYSTEM=="video4linux", ATTRS{serial}=="20250603", ATTR{index}=="0", SYMLINK+="webcam_EYD_2k"
+SUBSYSTEM=="video4linux", ATTRS{serial}=="241015140801", ATTR{index}=="0", SYMLINK+="webcam_EYD_1080p"
+"""
 
 class CameraPublisher(Node):
 
@@ -38,7 +45,7 @@ class CameraPublisher(Node):
         super().__init__('pi_camera_publisher')
 
         # ── Parameters ──────────────────────────────────────────
-        self.declare_parameter('camera_id',     0)
+        self.declare_parameter('camera_id',     '/dev/webcam_EYD_2k')
         self.declare_parameter('image_width',   640)
         self.declare_parameter('image_height',  480)
         self.declare_parameter('fps',           30)
