@@ -16,7 +16,7 @@ Topics subscribed:
   /capture_feedback           (String)  → "SUCCESS"
 
 Topics published:
-  /cmd_vel_mission   (Twist)
+  /cmd_vel   (Twist)
   /msg               (String)   DONE:planting / DONE:cabbage / FINISH
   /mission_debug     (Int32)    current MS_* state (for debug_x11)
 """
@@ -32,24 +32,26 @@ from std_msgs.msg import Float32MultiArray, Int32, String
 MS_IDLE          = 0
 MS_WAIT_0        = 1
 MS_APPROACH      = 2
-MS_REVERSE       = 3
-MS_WAIT_REVERSE  = 4
-MS_PLANT_1       = 5
-MS_WAIT_1        = 6
-MS_PLANT_2       = 7
-MS_WAIT_2        = 8
-MS_GAP           = 9
-MS_WAIT_3        = 10
-MS_INTERVAL_1    = 11
-MS_WAIT_4A       = 12
-MS_INTERVAL_2    = 13
-MS_WAIT_4B       = 14
-MS_FINISH        = 15
+MS_WAIT_APPROACH = 3
+MS_REVERSE       = 4
+MS_WAIT_REVERSE  = 5
+MS_PLANT_1       = 6
+MS_WAIT_1        = 7
+MS_PLANT_2       = 8
+MS_WAIT_2        = 9
+MS_GAP           = 10
+MS_WAIT_3        = 11
+MS_INTERVAL_1    = 12
+MS_WAIT_4A       = 13
+MS_INTERVAL_2    = 14
+MS_WAIT_4B       = 15
+MS_FINISH        = 16
 
 MS_NAME = {
     MS_IDLE:         "IDLE",
     MS_WAIT_0:       "WAIT_0",
     MS_APPROACH:     "APPROACH",
+    MS_WAIT_APPROACH: "WAIT_APPROACH",
     MS_REVERSE:      "REVERSE",
     MS_WAIT_REVERSE: "WAIT_REVERSE",
     MS_PLANT_1:      "PLANT_1",
@@ -88,7 +90,7 @@ class MissionController(Node):
         import math
         d = self.declare_parameter
         d('wheel_diameter',  0.127)
-        d('ticks_per_rev',   1440)
+        d('ticks_per_rev',   5940)
         d('forward_vel',     0.10)
         d('reverse_vel',     0.10)
         d('camera_target_z', 0.50)
@@ -125,7 +127,7 @@ class MissionController(Node):
                                  self._cb_plant_feedback, 10)
         self.create_subscription(String, '/capture_feedback',
                                  self._cb_capture_feedback, 10)
-
+        
         self._cmd_pub     = self.create_publisher(Twist,  self._cmd_topic, 1)
         self._msg_pub     = self.create_publisher(String, '/msg',          10)
         self._ms_dbg_pub  = self.create_publisher(Int32,  '/mission_debug', 5)
@@ -160,8 +162,21 @@ class MissionController(Node):
         self.get_logger().info(f"[PARAM] planting_distance={self._plant_dist_cm}cm")
 
     def _cb_gap(self, msg):
-        self._gap_cm = int(msg.data)
-        self.get_logger().info(f"[PARAM] gap_type={self._gap_cm}cm")
+        gap_code = int(msg.data)
+        gap_table = {
+            1: 5,
+            2: 10,
+            3: 15,
+            4: 20,
+            5: 25
+        }
+        if gap_code in gap_table:
+            self._gap_cm = gap_table[gap_code]
+        else:
+            self.get_logger().warn(f"[GAP] unknown code {gap_code}, default 10cm")
+            self._gap_cm = 10
+        self.get_logger().info(
+            f"[PARAM] gap_type={gap_code} → {self._gap_cm} cm")
 
     def _cb_interval(self, msg):
         self._interval_cm = int(msg.data)
@@ -184,6 +199,7 @@ class MissionController(Node):
             self.get_logger().info(
                 f"[FEEDBACK] /capture_feedback SUCCESS  ({MS_NAME[self._ms]})")
             self._capture_feedback_ok = True
+            
 
     # ── Helpers ──────────────────────────────────────────────────
     def _now(self):
@@ -199,7 +215,20 @@ class MissionController(Node):
 
     def _stop(self):    self._cmd_pub.publish(Twist())
     def _forward(self):
-        cmd = Twist(); cmd.linear.x = self._forward_vel; self._cmd_pub.publish(cmd)
+        remaining = self._target_m - self._travelled_m()
+        cmd = Twist()
+
+        slow_zone = 0.05     # 5 cm
+        stop_zone = 0.01     # 1 cm
+
+        if remaining <= stop_zone:
+            cmd.linear.x = 0.0
+        elif remaining < slow_zone:
+            cmd.linear.x = self._forward_vel * 0.3
+        else:
+            cmd.linear.x = self._forward_vel
+        self._cmd_pub.publish(cmd)
+
     def _reverse_cmd(self):
         cmd = Twist(); cmd.linear.x = -self._reverse_vel; self._cmd_pub.publish(cmd)
 
@@ -254,14 +283,20 @@ class MissionController(Node):
                     self._start_move(approach_m)
 
         elif self._ms == MS_APPROACH:
-            if self._travelled_m() >= self._target_m:
-                reverse_m = max(0.0, self._reverse_after_m - self._approach_m)
-                self._go(MS_REVERSE); self._start_move(reverse_m)
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._go(MS_WAIT_APPROACH)
+                self._start_wait()
             else:
                 self._forward()
+        
+        elif self._ms == MS_WAIT_APPROACH:
+            if self._wait_done():
+                reverse_m = max(0.0, self._reverse_after_m - self._approach_m)
+                self._go(MS_REVERSE)
+                self._start_move(reverse_m)
 
         elif self._ms == MS_REVERSE:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
                 self._go(MS_WAIT_REVERSE); self._start_wait()
             else:
                 self._reverse_cmd()
@@ -272,10 +307,11 @@ class MissionController(Node):
                 self._start_move(self._plant_dist_cm / 100.0)
 
         elif self._ms == MS_PLANT_1:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._stop()
                 self._plant_feedback_ok = False
                 self._go(MS_WAIT_1); self._start_wait()
-                self._pub_msg("DONE:planting")
+                self._pub_msg("DONE:planting1")
             else:
                 self._forward()
 
@@ -288,10 +324,11 @@ class MissionController(Node):
                 self.get_logger().warn("[WAIT_1] waiting for /plant_feedback SUCCESS...")
 
         elif self._ms == MS_PLANT_2:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._stop()
                 self._plant_feedback_ok = False
                 self._go(MS_WAIT_2); self._start_wait()
-                self._pub_msg("DONE:planting")
+                self._pub_msg("DONE:planting2")
             else:
                 self._forward()
 
@@ -304,7 +341,8 @@ class MissionController(Node):
                 self.get_logger().warn("[WAIT_2] waiting for /plant_feedback SUCCESS...")
 
         elif self._ms == MS_GAP:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._stop()
                 self._capture_feedback_ok = False
                 self._go(MS_WAIT_3); self._start_wait()
                 self._pub_msg("DONE:cabbage")
@@ -320,7 +358,8 @@ class MissionController(Node):
                 self.get_logger().warn("[WAIT_3] waiting for /capture_feedback SUCCESS...")
 
         elif self._ms == MS_INTERVAL_1:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._stop()
                 self._capture_feedback_ok = False
                 self._go(MS_WAIT_4A); self._start_wait()
                 self._pub_msg("DONE:cabbage")
@@ -336,7 +375,8 @@ class MissionController(Node):
                 self.get_logger().warn("[WAIT_4A] waiting for /capture_feedback SUCCESS...")
 
         elif self._ms == MS_INTERVAL_2:
-            if self._travelled_m() >= self._target_m:
+            if self._travelled_m() >= (self._target_m - 0.01):
+                self._stop()
                 self._capture_feedback_ok = False
                 self._go(MS_WAIT_4B); self._start_wait()
                 self._pub_msg("DONE:cabbage")

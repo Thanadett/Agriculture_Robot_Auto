@@ -3,14 +3,14 @@
 Laptop AprilTag Visual Servo — ROS2  (no X11, heading-PID compatible)
 ============================================================
 X11 debug has been moved to a dedicated debug_x11 node.
-cmd_topic default changed to /cmd_vel so HeadingPID sits between
-this node and the robot (/cmd_vel → heading_pid → /cmd_vel_pid).
+cmd_topic default changed to /cmd_vel_vision so HeadingPID sits between
+this node and the robot (/cmd_vel_vision → heading_pid → /cmd_vel_pid).
 
 Topics subscribed:
   /camera/image_raw/compressed  (sensor_msgs/CompressedImage)
 
 Topics published:
-  /cmd_vel                      (geometry_msgs/Twist)   ← to heading_pid
+  /cmd_vel_vision                      (geometry_msgs/Twist)   ← to heading_pid
   /vision_debug                 (std_msgs/Float32MultiArray)
   /apriltag/planting_distance   (std_msgs/Int32)
   /apriltag/gap_type            (std_msgs/Int32)
@@ -61,33 +61,33 @@ STATE_NAME = {
 # ════════════════════════════════════════════════════════════════
 # Tuning constants
 # ════════════════════════════════════════════════════════════════
-Z_ALIGN   = 0.58
-Z_FORWARD = 0.40
+Z_ALIGN   = 0.42
+Z_FORWARD = 0.38
 Z_STOP    = 0.25
 
-APPROACH_KP     = 1.00
+APPROACH_KP     = 0.80
 APPROACH_KI     = 0.00
-APPROACH_KD     = 0.20
+APPROACH_KD     = 0.05
 APPROACH_W_MAX  = 0.30
 APPROACH_V_BASE = 0.18
 APPROACH_V_MIN  = 0.04
-APPROACH_BEAR_DEAD = math.radians(1.5)   # ← deadband ลด oscillation
+APPROACH_BEAR_DEAD = math.radians(2.0)
 
-ALIGN_KP       = 0.80
+ALIGN_KP       = 0.60
 ALIGN_KI       = 0.00
-ALIGN_KD       = 0.25
-ALIGN_W_MAX    = 0.30
-ALIGN_V        = 0.08
+ALIGN_KD       = 0.10
+ALIGN_W_MAX    = 0.25
+ALIGN_V        = 0.12
 ALIGN_YAW_DEAD = math.radians(2.5)
 
 FORWARD_V = 0.10
-SEARCH_W  = 0.08
+SEARCH_W  = 0.00
 
 SCAN_BACK_W       = 0.18
 SCAN_BACK_MAX_DEG = 90.0
 SCAN_BACK_TIMEOUT = 10.0
 
-REVERSE_V = -0.15
+REVERSE_V = -0.12
 REVERSE_T = 2.0
 
 STUCK_SEC   = 3.0
@@ -260,7 +260,7 @@ class AprilTagServo(Node):
         d('invert_x', False);  d('invert_yaw', False)
         d('tag_size', 0.042)
         d('max_linear', 0.40); d('max_angular', 0.60)
-        d('cmd_topic', '/cmd_vel')           # ← HeadingPID sits downstream
+        d('cmd_topic', '/cmd_vel_vision')           # ← HeadingPID sits downstream
         d('yolo_model', 'best.pt')
         d('target_tag_id', -1)
         d('fx', 651.50491737); d('fy', 650.39077601)
@@ -314,7 +314,7 @@ class AprilTagServo(Node):
 
     def _init_state(self):
         self.state = STATE_SEARCH; self.frame_cnt = 0
-        self.tag = TagSmoother(alpha=0.55, window=3)
+        self.tag = TagSmoother(alpha=0.35, window=5)
         self.n_stable = 0; self.n_miss = 0; self.last_t = None
         self.published = False; self._last_tag_info = None
         self._sframe = 0; self._last_wdir = 1.0
@@ -409,7 +409,7 @@ class AprilTagServo(Node):
         R   = best.pose_R
         yaw = math.atan2(float(R[0,2]), float(R[2,2])) * (-1.0 if self.invert_yaw else 1.0)
 
-        bearing = math.atan2(x_m, max(z_m, 0.05))
+        bearing = math.atan2(x_m, max(z_m + 0.25, 0.05))
         tag_id  = best.tag_id
         self._last_tag_info = {
             'ab': tag_id // 1000, 'c': (tag_id // 100) % 10, 'de': tag_id % 100,

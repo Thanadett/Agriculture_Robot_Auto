@@ -19,10 +19,10 @@ def generate_launch_description():
         DeclareLaunchArgument('forward_vel',      default_value='0.10'),
         DeclareLaunchArgument('reverse_vel',      default_value='0.10'),
         DeclareLaunchArgument('camera_target_z',  default_value='0.50'),
-        DeclareLaunchArgument('reverse_after_m',  default_value='0.40'),
+        DeclareLaunchArgument('reverse_after_m',  default_value='0.4565'),
         DeclareLaunchArgument('wait_sec',         default_value='3.0'),
         DeclareLaunchArgument('wheel_diameter',   default_value='0.127'),
-        DeclareLaunchArgument('hdg_kp',           default_value='1.8',
+        DeclareLaunchArgument('hdg_kp',           default_value='0.8',
                               description='HeadingPID Kp'),
         DeclareLaunchArgument('hdg_kd',           default_value='0.02',
                               description='HeadingPID Kd'),
@@ -43,7 +43,7 @@ def generate_launch_description():
             'tag_size':        LaunchConfiguration('tag_size'),
             'invert_x':        LaunchConfiguration('invert_x'),
             'invert_yaw':      LaunchConfiguration('invert_yaw'),
-            'cmd_topic':       '/cmd_vel',   # → heading_pid
+            'cmd_topic':       '/cmd_vel_vision',   # → heading_pid
         }],
     )
 
@@ -55,7 +55,8 @@ def generate_launch_description():
         parameters=[{
             'kp':              LaunchConfiguration('hdg_kp'),
             'kd':              LaunchConfiguration('hdg_kd'),
-            'cmd_in_topic':    '/cmd_vel',
+            'cmd_in_topic_vision':    '/cmd_vel_vision',  # ← from laptop_node
+            'cmd_in_topic_mission':   '/cmd_vel_mission', # ← from mission_controller
             'cmd_out_topic':   '/cmd_vel_pid',
         }],
     )
@@ -72,7 +73,7 @@ def generate_launch_description():
             'reverse_after_m': LaunchConfiguration('reverse_after_m'),
             'wait_sec':        LaunchConfiguration('wait_sec'),
             'wheel_diameter':  LaunchConfiguration('wheel_diameter'),
-            'cmd_topic':       '/cmd_vel_pid', 
+            'cmd_topic':       '/cmd_vel_mission', 
         }],
     )
 
