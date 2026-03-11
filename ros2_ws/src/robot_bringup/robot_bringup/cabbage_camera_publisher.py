@@ -51,11 +51,15 @@ class CameraSidePublisher(Node):
                 Image, '/camera_side/image_raw', 10)
 
         # ── Camera Setup ────────────────────────────────────────
-        self.cap = cv2.VideoCapture(self.cam_id)
+        self.cap = cv2.VideoCapture(self.cam_id, cv2.CAP_V4L2)
+
+        # บังคับใช้ MJPEG เพื่อลด USB bandwidth
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.W)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.bridge = CvBridge()
         self.frame_cnt = 0

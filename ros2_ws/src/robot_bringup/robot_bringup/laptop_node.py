@@ -256,7 +256,7 @@ class AprilTagServo(Node):
 
     def _declare_params(self):
         d = self.declare_parameter
-        d('image_width', 640); d('image_height', 480)
+        d('image_width', 320); d('image_height', 240)
         d('invert_x', False);  d('invert_yaw', False)
         d('tag_size', 0.042)
         d('max_linear', 0.40); d('max_angular', 0.60)
