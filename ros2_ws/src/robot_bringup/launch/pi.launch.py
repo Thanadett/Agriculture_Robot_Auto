@@ -15,7 +15,7 @@ def generate_launch_description():
             'fps': 20,
             'jpeg_quality': 80,
             'publish_raw': False,
-            'use_x11_debug': False
+            'use_x11_debug': True
         }]
     )
 
@@ -30,7 +30,7 @@ def generate_launch_description():
             'fps': 8,
             'jpeg_quality': 60,
             'publish_raw': True,
-            'use_x11_debug': False
+            'use_x11_debug': True
         }]
     )
 
