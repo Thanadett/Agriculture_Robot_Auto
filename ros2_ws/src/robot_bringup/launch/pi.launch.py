@@ -13,7 +13,7 @@ def generate_launch_description():
             'image_width': 320,
             'image_height': 240,
             'fps': 20,
-            'jpeg_quality': 80,
+            'jpeg_quality': 60,
             'publish_raw': False,
             'use_x11_debug': True
         }]
@@ -28,7 +28,7 @@ def generate_launch_description():
             'image_width': 320,
             'image_height': 240,
             'fps': 8,
-            'jpeg_quality': 60,
+            'jpeg_quality': 40,
             'publish_raw': True,
             'use_x11_debug': True
         }]
