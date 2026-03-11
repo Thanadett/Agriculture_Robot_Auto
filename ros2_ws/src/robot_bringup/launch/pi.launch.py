@@ -9,7 +9,7 @@ def generate_launch_description():
         package='robot_bringup', 
         executable='pi_camera_publisher', 
         parameters=[{
-            'camera_id': '/dev/webcam_EYD_2k',
+            'camera_id': '/dev/video2',
             'image_width': 320,
             'image_height': 240,
             'fps': 20,
@@ -24,7 +24,7 @@ def generate_launch_description():
         package='robot_bringup',
         executable='cabbage_camera_publisher',
         parameters=[{
-            'camera_id': '/dev/webcam_EYD_1080p',
+            'camera_id': '/dev/video5',
             'image_width': 320,
             'image_height': 240,
             'fps': 8,
