@@ -1,0 +1,32 @@
+SAVE_DIR           = "green_circle_pictures"
+CENTER_TOL         = 50     # px — centerline tolerance
+NEAR_LINE_RANGE    = 120    # px
+CAPTURE_COOLDOWN   = 3.0    # seconds — global cooldown after each capture
+
+# ── Averaging window before capture ──
+MEASURE_DELAY      = 0.5    # seconds — collect radius samples for this duration before capturing
+                             # once object enters centerline, wait MEASURE_DELAY seconds,
+                             # then average all collected radius values and capture
+
+# ── Distance and size parameters ──
+FOCAL_LENGTH_PX    = 600    # px  — measured at REFERENCE_WIDTH (640px)
+CAMERA_DISTANCE_CM = 28     # cm  — camera to object distance
+MIN_RADIUS_CM      = 5      # cm  — minimum radius (diameter >= 20cm)
+
+# ── Camera resolution ──
+CAPTURE_WIDTH      = 160    # px
+CAPTURE_HEIGHT     = 120    # px
+REFERENCE_WIDTH    = 640    # px  — width used when measuring FOCAL_LENGTH_PX
+
+FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
+
+# ── PX_PER_CM calculated from real measurement ──
+# Real object diameter=15.91cm → radius=7.955cm, measured radius=172px
+# PX_PER_CM = 172 / 7.955 = 21.62
+PX_PER_CM = 29.27   # px/cm — hardcoded from real measurement
+
+# MIN_CAPTURE_RADIUS stored as float
+MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # minimum radius in px (float)
+
+# ── Process every N frames ──
+PROCESS_EVERY_N_FRAMES = 4

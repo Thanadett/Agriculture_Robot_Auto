@@ -52,6 +52,7 @@ setup(
             'mission_controller = robot_bringup.mission_controller:main',
             'debug_x11 = robot_bringup.debug_x11:main',
             'cabbage_camera_publisher = robot_bringup.cabbage_camera_publisher:main',
+            'lc_laptop_cabbage_detect = robot_bringup.laptop_cabbage_detect:main',
         ],
     },
 )
