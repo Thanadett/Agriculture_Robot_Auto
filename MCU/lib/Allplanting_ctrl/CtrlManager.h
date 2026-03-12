@@ -31,6 +31,9 @@ private:
     float _servo_plate_CurrentAngle = 16.3; // เก็บองศาปัจจุบันของ Servo 
     unsigned long _lastServoUpdate = 0; // เวลาที่อัปเดตองศาล่าสุด
 
+    bool _homingActive = false;      // กำลัง homing อยู่ไหม
+    bool _limitTriggered = false;    // limit switch โดน trigger ไหม
+
     int desireAngle = 0; // องศาที่ต้องการ (0-270)
     // Helper for TB6600 (Active-Low)
     void ena_enable();
@@ -57,6 +60,10 @@ public:
     void resetPattern();
     void update(); // call in loop()
     void stopAll(); // for Emergency Stop
+
+    bool isLimitTriggered() { return _limitTriggered; }
+    bool checkLimitSwitch();   // อ่านค่า switch (LOW = triggered เพราะ INPUT_PULLUP + NO)
+    void startHoming();        // เริ่ม homing sequence
 };
 
 

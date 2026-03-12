@@ -18,6 +18,13 @@ int PlantingManager::moveToAngle(int desireAngle, int maxAngle){
     return map(desireAngle, 0, maxAngle, 500, 2500);
 }
 
+// อ่านค่า limit switch
+// NO + INPUT_PULLUP → ปกติ HIGH, กด = LOW
+bool PlantingManager::checkLimitSwitch() {
+    return digitalRead(limitSwitchPin) == LOW;
+}
+
+
 void PlantingManager::begin() {
     // Setup Servos
     ESP32PWM::allocateTimer(0);
@@ -101,6 +108,21 @@ void PlantingManager::update() {
     _stepper.run();
     // Serial.println(_stepper.currentPosition());
     // runStepper();
+
+    // === LIMIT SWITCH GUARD ===
+    if (checkLimitSwitch()) {
+        _limitTriggered = true;
+        if (_activeMode != IDLE && !_homingActive) {
+            // Emergency stop ถ้าไม่ได้กำลัง homing
+            stopAll();
+            Serial.println("[LIMIT] Emergency stop triggered!");
+            return;
+        }
+    } else {
+        _limitTriggered = false; // reset เมื่อปล่อย
+    }
+    // ==========================
+
     if (_activeMode == IDLE) return;
     // if (!_isPatternRunning) return;
 
@@ -291,16 +313,20 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 1000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 31: //gripper, stepper go idle, stepper go to the point 
-                    // Serial.println(_stepper.currentPosition());
+                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
-                        _stepper.moveTo(mmToSteps(0.0));
+                        _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
                     }
 
-                    if (_stepper.distanceToGo() == 0) {
+                    if (checkLimitSwitch()) {
+                        // โดน limit switch แล้ว → นี่คือ home
+                        _stepper.stop();
+                        _stepper.setCurrentPosition(0); // reset encoder เป็น 0
+                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
-                        _previous_Millis = currentMillis;
+                        _previous_Millis = currentMillis;                    
                     }
                     break;
                 case 32: // จบ Pattern
@@ -487,16 +513,20 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 29: //gripper, stepper go idle, stepper go to the point 
-                    // Serial.println(_stepper.currentPosition());
+                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
-                        _stepper.moveTo(mmToSteps(0.0));
+                        _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
                     }
 
-                    if (_stepper.distanceToGo() == 0) {
+                    if (checkLimitSwitch()) {
+                        // โดน limit switch แล้ว → นี่คือ home
+                        _stepper.stop();
+                        _stepper.setCurrentPosition(0); // reset encoder เป็น 0
+                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
-                        _previous_Millis = currentMillis;
+                        _previous_Millis = currentMillis;                    
                     }
                     break;
                 case 30: // จบ Pattern
@@ -572,15 +602,20 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
+                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
-                        _stepper.moveTo(mmToSteps(0.0));
+                        _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
                     }
 
-                    if (_stepper.distanceToGo() == 0) {
+                    if (checkLimitSwitch()) {
+                        // โดน limit switch แล้ว → นี่คือ home
+                        _stepper.stop();
+                        _stepper.setCurrentPosition(0); // reset encoder เป็น 0
+                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
-                        _previous_Millis = currentMillis;
+                        _previous_Millis = currentMillis;                    
                     }
                     break;
                 case 3:
