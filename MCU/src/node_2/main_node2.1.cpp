@@ -57,8 +57,8 @@ void StepperLoop(void * pvParameters) {
 void waitRobotStop() {
   delay(100);
     while(robot.isBusy()) { 
-        // ไม่ต้องเรียก robot.update() ตรงนี้ เพราะแยกไปรันที่ Core 0 แล้ว
-        vTaskDelay(20 / portTICK_PERIOD_MS); 
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)); // ← keep alive
+        vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }
 
@@ -70,12 +70,15 @@ void publish_feedback(const char * text) {
 }
 
 // Callback สำหรับ vision_debug
+bool cam_has_moved = false;
+
 void vision_callback(const void * msgin) {
   const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msgin;
   if (msg->data.size > 0) {
-    vision_state_val = msg->data.data[0]; // รับค่าตัวที่ 0 (state)
-    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE) {
+    vision_state_val = msg->data.data[0];
+    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE && !cam_has_moved) {
       pending_cmd = CMD_CAMUP;
+      cam_has_moved = true; // ล็อคไม่ให้ขยับซ้ำ
     }
   }
 }
@@ -176,6 +179,7 @@ void loop() {
 
       if (cmd == CMD_RESET) {
         publish_feedback("resetting system");
+        cam_has_moved = false; 
         robot.resetPattern();
         waitRobotStop();
         publish_feedback("SUCCESS");
