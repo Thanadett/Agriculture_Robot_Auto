@@ -115,3 +115,5 @@ static constexpr float GYRO_SENS_250 = 131.0f;   // LSB/(deg/s)
 
 const int TRIG_PIN = 12; 
 const int ECHO_PIN = 34; 
+
+const int limitSwitchPin = 13;

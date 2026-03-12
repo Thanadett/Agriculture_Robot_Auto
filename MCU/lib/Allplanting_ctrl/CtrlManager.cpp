@@ -35,6 +35,7 @@ void PlantingManager::begin() {
     pinMode(PIN_STEP, OUTPUT);
     pinMode(PIN_DIR, OUTPUT);
     pinMode(PIN_ENABLE, OUTPUT);
+    pinMode(limitSwitchPin, INPUT_PULLUP);
     ena_enable(); // เปิด Driver ทันที
     
     // set up Invert like before (TB6600)
