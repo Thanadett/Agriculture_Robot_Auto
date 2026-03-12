@@ -1,28 +1,4 @@
 #!/usr/bin/env python3
-"""
-Debug X11 Node — Unified Visualization
-============================================================
-แสดงข้อมูลจากทุก node ในหน้าต่างเดียว:
-  • ซ้าย  : ภาพกล้องพร้อม overlay
-  • กลาง  : Top-down map + heading lock indicator
-  • ขวา   : Mission state timeline + params
-  • ล่าง  : Real-time charts (z, bearing, v, ω, heading_error, heading_u)
-
-Layout (1440 × 800):
-  ┌─[Camera 560×420]──┬─[Map 300×420]──┬─[Mission 580×420]─┐
-  └─────────────────── Charts (1440×380) ────────────────────┘
-
-Topics subscribed:
-  /camera/image_raw/compressed  (CompressedImage)
-  /vision_debug                 (Float32MultiArray)
-      [state, x, z, yaw, v, w, n_stable, stuck, bearing]
-  /cmd_vel_pid                  (Twist)   — final robot command
-  /pid_debug                    (Float32MultiArray)
-      [error, u, deriv, yaw_ref, yaw]
-  /msg                          (String)  — mission events
-  /mission_debug                (Int32)   — current MS_* state
-"""
-
 import math
 import collections
 import time
@@ -37,7 +13,7 @@ import cv2
 import numpy as np
 
 # ════════════════════════════════════════════════════════════════
-# Vision states (mirror of apriltag_servo)
+# Vision states
 # ════════════════════════════════════════════════════════════════
 STATE_SEARCH    = 0
 STATE_APPROACH  = 1
@@ -68,7 +44,7 @@ STATE_COLOR = {
 }
 
 # ════════════════════════════════════════════════════════════════
-# Mission states (mirror of mission_controller)
+# Mission states
 # ════════════════════════════════════════════════════════════════
 MS_IDLE = 0; MS_WAIT_0 = 1; MS_APPROACH_M = 2; MS_REVERSE_M = 3
 MS_WAIT_REVERSE = 4; MS_PLANT_1 = 5; MS_WAIT_1 = 6; MS_PLANT_2 = 7
@@ -146,7 +122,6 @@ def draw_chart(canvas, x, y, w, h, ring, label, lo, hi, color,
     cv2.rectangle(canvas, (x,y), (x+w, y+h), (38,38,38),  1)
     span = float(hi - lo) or 1.0
 
-    # zero line
     if lo < 0 < hi:
         zy = y + h - int(-lo / span * h)
         cv2.line(canvas, (x, zy), (x+w, zy), (50,50,50), 1)
@@ -154,14 +129,12 @@ def draw_chart(canvas, x, y, w, h, ring, label, lo, hi, color,
     data = ring.arr(); n = len(data)
     if n < 2: return
 
-    # Build polyline
     pts = []
     for i, v in enumerate(data):
         px = x + int(i / max(n-1,1) * (w-1))
         py = y + h - int(np.clip((v-lo)/span, 0, 1) * (h-2))
         pts.append((px, py))
 
-    # Filled polygon under curve
     if fill_alpha > 0:
         baseline_y = y + h - int(-lo / span * h) if lo < 0 < hi else y + h
         poly = np.array(pts + [(pts[-1][0], baseline_y),
@@ -170,7 +143,6 @@ def draw_chart(canvas, x, y, w, h, ring, label, lo, hi, color,
         cv2.fillPoly(overlay, [poly], color)
         cv2.addWeighted(overlay, fill_alpha, canvas, 1-fill_alpha, 0, canvas)
 
-    # Line
     for i in range(1, len(pts)):
         cv2.line(canvas, pts[i-1], pts[i], color, 1)
 
@@ -180,60 +152,171 @@ def draw_chart(canvas, x, y, w, h, ring, label, lo, hi, color,
     cv2.putText(canvas, f"[{lo:.1f},{hi:.1f}]",
                 (x+6, y+h-5), _FONT, 0.26, (55,55,55), 1)
 
-    # Current value indicator (dot on right edge)
     lv = pts[-1]
     cv2.circle(canvas, lv, 3, color, -1)
 
 
-def draw_topview(canvas, ox, oy, tag_x, tag_z, tag_yaw, state, trail):
-    cv2.rectangle(canvas, (ox,oy), (ox+MAP_W, oy+MAP_H), (12,12,18), -1)
-    cv2.rectangle(canvas, (ox,oy), (ox+MAP_W, oy+MAP_H), (45,45,60),  1)
-    rx = ox + MAP_CX; ry = oy + MAP_CY
+# ════════════════════════════════════════════════════════════════
+# World-frame top-down map  (ใหม่ — แทน draw_topview เดิม)
+# ════════════════════════════════════════════════════════════════
+def draw_worldmap(canvas, ox, oy,
+                  robot_wx, robot_wy, robot_yaw,
+                  plant_wx, plant_wy,
+                  world_trail, state):
+    """
+    World-frame top-down map:
+      • Plant (tag) วาดเป็น green circle
+      • Robot วาดเป็น blue circle + red yaw arrow
+      • Trail  วาดเส้น path ที่ผ่านมา
+      • Grid + axis labels คล้าย matplotlib
+    """
+    # ── Background ───────────────────────────────────────────────
+    cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (15, 15, 20), -1)
+    cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (40, 40, 55),  1)
 
-    # Grid lines
-    for zm in np.arange(0.2, 2.6, 0.2):
-        gy  = ry - int(zm * MAP_SCALE)
-        col = (38,38,45) if round(zm*5)%5 else (58,58,70)
-        if oy < gy < oy+MAP_H:
-            cv2.line(canvas, (ox, gy), (ox+MAP_W, gy), col, 1)
+    # ── Plot area margins ────────────────────────────────────────
+    PAD_L = 28; PAD_B = 18; PAD_T = 24; PAD_R = 8
+    PX = ox + PAD_L
+    PY = oy + PAD_T
+    PW = MAP_W - PAD_L - PAD_R
+    PH = MAP_H - PAD_T - PAD_B
 
-    # Zone lines
-    for zm, lbl, col in [
-            (Z_ALIGN,   "ALIGN",   (60,100,200)),
-            (Z_FORWARD, "FORWARD", (50,170, 60)),
-            (Z_STOP,    "STOP",    (160, 50, 50))]:
-        gy = ry - int(zm * MAP_SCALE)
-        if oy < gy < oy+MAP_H:
-            cv2.line(canvas, (ox,gy), (ox+MAP_W,gy), col, 1)
-            cv2.putText(canvas, f"{lbl} {zm:.2f}m",
-                        (ox+MAP_W-75, gy-2), _FONT, 0.24, col, 1)
+    # ── World range (auto-fit + margin) ─────────────────────────
+    all_wx = [plant_wx]
+    all_wy = [plant_wy]
+    if robot_wx is not None:
+        all_wx.append(robot_wx)
+        all_wy.append(robot_wy)
+    for pt in world_trail:
+        all_wx.append(pt[0])
+        all_wy.append(pt[1])
 
-    # Trail
-    for i in range(1, len(trail)):
-        cv2.line(canvas, trail[i-1], trail[i], (30,65,35), 1)
+    span = max(max(all_wx) - min(all_wx), max(all_wy) - min(all_wy), 1.0)
+    margin = span * 0.30 + 0.3
+    wx_min = min(all_wx) - margin
+    wx_max = max(all_wx) + margin
+    wy_min = min(all_wy) - margin
+    wy_max = max(all_wy) + margin
 
-    scol = STATE_COLOR.get(state, (180,180,180))
-    # Tag marker
-    if tag_z is not None and tag_z > 0:
-        tx = rx + int(tag_x * MAP_SCALE)
-        ty = ry - int(tag_z * MAP_SCALE)
-        tx = max(ox+5, min(ox+MAP_W-5, tx))
-        ty = max(oy+5, min(oy+MAP_H-5, ty))
-        cv2.circle(canvas, (tx,ty), 10, scol, -1)
-        cv2.circle(canvas, (tx,ty), 10, (255,255,255), 1)
-        # Yaw arrow
-        ax = tx + int(math.sin(tag_yaw) * 28)
-        ay = ty - int(math.cos(tag_yaw) * 28)
-        cv2.arrowedLine(canvas, (tx,ty), (ax,ay), (255,200,0), 2, tipLength=0.4)
-        # Distance label
-        cv2.line(canvas, (rx,ry), (tx,ty), (50,50,60), 1)
-        _txt(canvas, f"z={tag_z:.2f}m", (tx+8,ty-8), 0.32, scol)
+    # Keep aspect ratio square
+    wx_span = wx_max - wx_min
+    wy_span = wy_max - wy_min
+    if wx_span > wy_span:
+        diff = wx_span - wy_span
+        wy_min -= diff / 2; wy_max += diff / 2
+    else:
+        diff = wy_span - wx_span
+        wx_min -= diff / 2; wx_max += diff / 2
 
-    # Robot (fixed at bottom)
-    cv2.circle(canvas, (rx,ry), 9, (0,180,255), -1)
-    cv2.circle(canvas, (rx,ry), 9, (255,255,255), 1)
-    cv2.arrowedLine(canvas, (rx,ry), (rx,ry-26), (0,230,255), 2, tipLength=0.4)
-    _txt(canvas, "MAP", (ox+5,oy+14), 0.32, (70,70,90))
+    wx_span = wx_max - wx_min
+    wy_span = wy_max - wy_min
+
+    def w2p(wx, wy):
+        """World coords → canvas pixel."""
+        px = PX + int((wx - wx_min) / wx_span * PW)
+        py = PY + PH - int((wy - wy_min) / wy_span * PH)
+        return (int(px), int(py))
+
+    # ── Dashed grid lines at 0.5 m intervals ────────────────────
+    def _nice_ticks(lo, hi, step=0.5):
+        start = math.floor(lo / step) * step
+        t = start
+        while t <= hi + 1e-6:
+            yield round(t, 2)
+            t += step
+
+    DASH, GAP = 5, 4
+    for gx in _nice_ticks(wx_min, wx_max):
+        p1 = w2p(gx, wy_min); p2 = w2p(gx, wy_max)
+        col = (65, 65, 85) if abs(gx) > 1e-3 else (90, 90, 110)
+        y = p1[1]
+        while y > p2[1]:
+            cv2.line(canvas, (p1[0], y), (p1[0], max(y-DASH, p2[1])), col, 1)
+            y -= DASH + GAP
+        # X tick label
+        lp = w2p(gx, wy_min)
+        cv2.putText(canvas, f"{gx:.1f}", (lp[0]-8, oy+MAP_H-4),
+                    _FONT, 0.22, (80, 80, 105), 1)
+
+    for gy in _nice_ticks(wy_min, wy_max):
+        p1 = w2p(wx_min, gy); p2 = w2p(wx_max, gy)
+        col = (65, 65, 85) if abs(gy) > 1e-3 else (90, 90, 110)
+        x = p1[0]
+        while x < p2[0]:
+            cv2.line(canvas, (x, p1[1]), (min(x+DASH, p2[0]), p1[1]), col, 1)
+            x += DASH + GAP
+        # Y tick label
+        lp = w2p(wx_min, gy)
+        cv2.putText(canvas, f"{gy:.1f}", (ox+1, lp[1]+4),
+                    _FONT, 0.22, (80, 80, 105), 1)
+
+    # Solid zero axes
+    if wy_min < 0 < wy_max:
+        p1 = w2p(wx_min, 0); p2 = w2p(wx_max, 0)
+        cv2.line(canvas, p1, p2, (80, 80, 100), 1)
+    if wx_min < 0 < wx_max:
+        p1 = w2p(0, wy_min); p2 = w2p(0, wy_max)
+        cv2.line(canvas, p1, p2, (80, 80, 100), 1)
+
+    # ── Trail (robot path) ───────────────────────────────────────
+    trail_pts = [w2p(pt[0], pt[1]) for pt in world_trail]
+    for i in range(1, len(trail_pts)):
+        alpha = 0.4 + 0.6 * (i / max(len(trail_pts)-1, 1))
+        col = (int(30*alpha), int(180*alpha), int(80*alpha))
+        cv2.line(canvas, trail_pts[i-1], trail_pts[i], col, 1)
+
+    # ── Plant (target) green circle ──────────────────────────────
+    pp = w2p(plant_wx, plant_wy)
+    cv2.circle(canvas, pp, 13, (0, 170, 55), -1)
+    cv2.circle(canvas, pp, 13, (80, 255, 120), 2)
+    _txt(canvas, "PLANT", (pp[0]+16, pp[1]+4), 0.30, (80, 255, 120))
+
+    # ── Robot blue circle + red yaw arrow ───────────────────────
+    scol = STATE_COLOR.get(state, (180, 180, 180))
+    if robot_wx is not None and robot_wy is not None:
+        rp = w2p(robot_wx, robot_wy)
+        rp = (max(PX+6, min(PX+PW-6, rp[0])),
+              max(PY+6,  min(PY+PH-6, rp[1])))
+
+        # Line robot → plant (dashed guide)
+        pp_c = w2p(plant_wx, plant_wy)
+        cv2.line(canvas, rp, pp_c, (50, 50, 70), 1)
+
+        # Distance label at midpoint
+        dist = math.sqrt((robot_wx - plant_wx)**2 + (robot_wy - plant_wy)**2)
+        mid  = ((rp[0]+pp_c[0])//2, (rp[1]+pp_c[1])//2)
+        _txt(canvas, f"{dist:.2f}m", (mid[0]+4, mid[1]-4), 0.28, (120, 120, 160))
+
+        # Robot circle (blue)
+        cv2.circle(canvas, rp, 8, (220, 110, 40), -1)
+        cv2.circle(canvas, rp, 8, (255, 255, 255), 1)
+
+        # Yaw arrow (red, like matplotlib)
+        yaw = robot_yaw if robot_yaw is not None else 0.0
+        arrow_len = max(18, int(PW * 0.10))
+        ax = rp[0] + int(math.sin(yaw) * arrow_len)
+        ay = rp[1] - int(math.cos(yaw) * arrow_len)
+        # Clamp arrow tip
+        ax = max(PX, min(PX+PW, ax)); ay = max(PY, min(PY+PH, ay))
+        cv2.arrowedLine(canvas, rp, (ax, ay), (50, 80, 220), 2, tipLength=0.35)
+
+        # Coord label near robot
+        lx = rp[0] + 10
+        ly = rp[1] - 10
+        if lx + 70 > PX + PW: lx = rp[0] - 72
+        _txt(canvas, f"X={robot_wx:+.2f}", (lx, ly),      0.28, scol)
+        _txt(canvas, f"Y={robot_wy:+.2f}", (lx, ly + 13), 0.28, scol)
+
+    # ── Header title ─────────────────────────────────────────────
+    yaw_deg = math.degrees(robot_yaw) if robot_yaw is not None else 0.0
+    rwx = robot_wx if robot_wx is not None else 0.0
+    rwy = robot_wy if robot_wy is not None else 0.0
+    title = f"Pos: X={rwx:+.2f}, Y={rwy:+.2f}, Yaw={yaw_deg:+.1f}"
+    _txt(canvas, title, (ox+4, oy+16), 0.30, (170, 170, 210))
+
+    # ── HeadingPID lock indicator (top-right corner of map) ──────
+    # (ยังคงไว้ด้านบนขวาของ MAP panel เหมือนเดิม)
+    return w2p   # return helper so caller can use if needed
 
 
 def draw_mission_panel(canvas, ox, oy, ms_state, ms_events,
@@ -244,7 +327,6 @@ def draw_mission_panel(canvas, ox, oy, ms_state, ms_events,
 
     _txt(canvas, "MISSION", (ox+8, oy+18), 0.50, (160,160,200), 2)
 
-    # Progress bar — 16 states
     bar_total = 16
     bx  = ox + 8; by = oy + 30
     bw  = (INFO_W - 16) // bar_total
@@ -261,12 +343,10 @@ def draw_mission_panel(canvas, ox, oy, ms_state, ms_events,
         else:
             cv2.rectangle(canvas, (x0,y0), (x0+bw-2, y0+bh), (25,25,30), -1)
 
-    # Current state label (large)
     cur_name = MS_NAME.get(ms_state, f"MS{ms_state}")
     cur_col  = MS_COLOR.get(ms_state, (200,200,200))
     _txt(canvas, cur_name, (ox+8, oy+85), 0.65, cur_col, 2)
 
-    # Feedback status
     pk_col = (0,230,100) if plant_ok else (80,80,80)
     ck_col = (0,230,100) if capture_ok else (80,80,80)
     cv2.circle(canvas, (ox+8+6,  oy+108), 6, pk_col, -1)
@@ -274,7 +354,6 @@ def draw_mission_panel(canvas, ox, oy, ms_state, ms_events,
     _txt(canvas, "plant", (ox+18,  oy+113), 0.30, pk_col)
     _txt(canvas, "capture",(ox+36, oy+113), 0.30, ck_col)
 
-    # Event log (last 12 events)
     _txt(canvas, "EVENT LOG", (ox+8, oy+132), 0.32, (100,100,140))
     log_y = oy + 148
     for i, (ts, ev) in enumerate(ms_events):
@@ -328,7 +407,6 @@ class DebugX11(Node):
         self._frame       = None
         self._frame_cnt   = 0
 
-        # vision_debug: [state, x, z, yaw, v, w, n_stable, stuck, bearing]
         self._v_state   = float(STATE_SEARCH)
         self._v_x       = None
         self._v_z       = None
@@ -339,25 +417,30 @@ class DebugX11(Node):
         self._v_stuck   = 0
         self._v_bearing = None
 
-        # cmd_vel_pid
         self._cmd_v = 0.0
         self._cmd_w = 0.0
 
-        # pid_debug: [error, u, deriv, yaw_ref, yaw]
         self._pid_error = 0.0
         self._pid_u     = 0.0
         self._pid_deriv = 0.0
         self._pid_yaw_ref = 0.0
         self._pid_yaw     = 0.0
 
-        # mission
         self._ms_state   = 0
-        self._ms_events  = collections.deque(maxlen=12)   # (ts, text)
+        self._ms_events  = collections.deque(maxlen=12)
         self._t0         = time.monotonic()
         self._plant_ok   = False
         self._capture_ok = False
 
-        self._trail: list[tuple[int,int]] = []
+        # ── World-frame position ─────────────────────────────────
+        # Plant (tag) ตรึงที่ world (0, 0)
+        # Robot อยู่ที่ (-tag_x, -tag_z) เมื่อเห็น tag
+        self._robot_wx:  float | None = None   # world X
+        self._robot_wy:  float | None = None   # world Y
+        self._robot_yaw: float | None = None   # robot heading (from tag yaw)
+
+        # Trail เก็บ (world_x, world_y) เป็น float
+        self._world_trail: list[tuple[float, float]] = []
 
     def _init_rings(self):
         n = HIST_N
@@ -367,8 +450,8 @@ class DebugX11(Node):
         self.rb_yaw  = Ring(n)
         self.rb_v    = Ring(n)
         self.rb_w    = Ring(n)
-        self.rb_herr = Ring(n)   # heading error
-        self.rb_hu   = Ring(n)   # heading PID output
+        self.rb_herr = Ring(n)
+        self.rb_hu   = Ring(n)
         self.rb_cmdv = Ring(n)
         self.rb_cmdw = Ring(n)
 
@@ -395,7 +478,8 @@ class DebugX11(Node):
             self._v_stable  = int(d[6])
             self._v_stuck   = int(d[7])
             self._v_bearing = d[8] if d[8] != -999.0 else None
-            # push to rings
+
+            # Push to rings
             self.rb_z.push(self._v_z if self._v_z is not None else 2.0)
             self.rb_x.push(self._v_x if self._v_x is not None else 0.0)
             self.rb_v.push(self._v_v)
@@ -404,14 +488,25 @@ class DebugX11(Node):
                 self.rb_bear.push(self._v_bearing)
             if self._v_yaw is not None:
                 self.rb_yaw.push(self._v_yaw)
-            # trail update
+
+            # ── World-frame position update ──────────────────────
+            # Plant อยู่ที่ (0,0) ในกรอบโลก
+            # Robot = (-tag_x, -tag_z)  [tag_x=ซ้าย/ขวา, tag_z=ระยะหน้า]
             if self._v_x is not None and self._v_z is not None:
-                px = MAP_X + MAP_CX + int(self._v_x * MAP_SCALE)
-                py = MAP_CY - int(self._v_z * MAP_SCALE)
-                if not self._trail or self._trail[-1] != (px, py):
-                    self._trail.append((px, py))
-                    if len(self._trail) > HIST_N:
-                        self._trail.pop(0)
+                wx = -float(self._v_x)
+                wy = -float(self._v_z)
+                self._robot_wx  = wx
+                self._robot_wy  = wy
+                self._robot_yaw = float(self._v_yaw) if self._v_yaw is not None else 0.0
+
+                # Append ถ้าขยับพอ (threshold 0.01 m) เพื่อไม่ให้ trail หนาแน่นเกิน
+                MIN_DIST = 0.01
+                if (not self._world_trail or
+                        math.hypot(wx - self._world_trail[-1][0],
+                                   wy - self._world_trail[-1][1]) >= MIN_DIST):
+                    self._world_trail.append((wx, wy))
+                    if len(self._world_trail) > HIST_N:
+                        self._world_trail.pop(0)
 
     def _cb_cmd(self, msg: Twist):
         self._cmd_v = msg.linear.x
@@ -433,7 +528,6 @@ class DebugX11(Node):
     def _cb_msg(self, msg: String):
         ts = time.monotonic() - self._t0
         self._ms_events.append((ts, msg.data))
-        # Update feedback state flags visually
         if "planting" in msg.data:
             self._plant_ok = True
         if "cabbage" in msg.data:
@@ -443,10 +537,9 @@ class DebugX11(Node):
 
     def _cb_ms(self, msg: Int32):
         self._ms_state = msg.data
-        # reset feedback indicators on state entry
-        if msg.data in (5, 7):   # PLANT_x start
+        if msg.data in (5, 7):
             self._plant_ok = False
-        if msg.data in (9, 11, 13):   # GAP/INTERVAL start
+        if msg.data in (9, 11, 13):
             self._capture_ok = False
 
     # ── Render ───────────────────────────────────────────────────
@@ -467,13 +560,11 @@ class DebugX11(Node):
             cam = np.zeros((CAM_H, CAM_W, 3), dtype=np.uint8)
             _txt(cam, "NO CAMERA", (CAM_W//2-60, CAM_H//2), 0.7, (60,60,80), 2)
 
-        # Camera header bar
         cv2.rectangle(cam, (0,0), (CAM_W, 32), (0,0,0), -1)
         _txt(cam, STATE_NAME.get(v_state,"?"), (6,23), 0.65, scol, 2)
         _txt(cam, f"stable:{self._v_stable:3d}  stuck:{self._v_stuck:2d}",
              (180, 23), 0.38, (120,120,120))
 
-        # Tag overlay bar
         if tag_z is not None:
             cv2.rectangle(cam, (0, CAM_H-36), (CAM_W, CAM_H), (0,0,0,128), -1)
             _txt(cam, f"x={tag_x:+.3f}m", (6, CAM_H-21), 0.38, (0,220,220))
@@ -485,11 +576,19 @@ class DebugX11(Node):
 
         canvas[0:CAM_H, 0:CAM_W] = cam
 
-        # ── Map panel ────────────────────────────────────────────
-        draw_topview(canvas, MAP_X, 0,
-                     tag_x, tag_z, tag_yaw, v_state, self._trail)
+        # ── World-frame Map panel ─────────────────────────────────
+        draw_worldmap(
+            canvas, MAP_X, 0,
+            robot_wx  = self._robot_wx,
+            robot_wy  = self._robot_wy,
+            robot_yaw = self._robot_yaw,
+            plant_wx  = 0.0,
+            plant_wy  = 0.0,
+            world_trail = self._world_trail,
+            state       = v_state,
+        )
 
-        # HeadingPID lock indicator on map
+        # HeadingPID lock indicator (วางที่มุมบนขวาของ map panel)
         lock_active = abs(self._cmd_v) > 0.02 and abs(self._cmd_w) < 0.05
         lx = MAP_X + MAP_W - 80; ly = 10
         lc = (0,230,100) if lock_active else (60,60,80)
@@ -498,7 +597,7 @@ class DebugX11(Node):
         _txt(canvas, "HDG LOCK" if lock_active else "HDG FREE",
              (lx+4, ly+16), 0.35, lc)
 
-        # HeadingPID mini display
+        # HeadingPID mini display (ล่างของ map panel)
         hx = MAP_X + 4; hy = MAP_H - 70
         cv2.rectangle(canvas, (hx,hy), (hx+MAP_W-8, hy+64), (0,0,0), -1)
         _txt(canvas, "HeadingPID", (hx+4, hy+13), 0.32, (120,120,160))
@@ -509,7 +608,6 @@ class DebugX11(Node):
                      f"  u={self._pid_u:+.3f}",
              (hx+4, hy+43), 0.32,
              (0,230,100) if abs(self._pid_error) < math.radians(3) else (255,160,50))
-        # Error bar
         bar_w = MAP_W - 20
         bar_x = hx + 4; bar_y = hy + 52
         cv2.rectangle(canvas, (bar_x,bar_y), (bar_x+bar_w, bar_y+8), (30,30,30), -1)
@@ -524,7 +622,6 @@ class DebugX11(Node):
                            list(self._ms_events)[-12:],
                            self._plant_ok, self._capture_ok)
 
-        # Final cmd overlay on mission panel (bottom-right)
         cx = INFO_X + 8; cy = INFO_H - 44
         cv2.rectangle(canvas, (cx,cy), (cx+INFO_W-16, cy+40), (0,0,0), -1)
         _txt(canvas, "FINAL CMD", (cx+4, cy+13), 0.32, (100,100,140))
@@ -549,18 +646,17 @@ class DebugX11(Node):
             draw_chart(canvas, i*cw, CHT_Y, cw-1, CHT_H-1,
                        ring, lbl, lo, hi, col)
 
-        # Bottom border with FPS
-        fps_txt = f"frame #{self._frame_cnt}"
-        cv2.putText(canvas, fps_txt, (WIN_W-120, WIN_H-6),
-                    _FONT, 0.28, (50,50,60), 1)
+        cv2.putText(canvas, f"frame #{self._frame_cnt}",
+                    (WIN_W-120, WIN_H-6), _FONT, 0.28, (50,50,60), 1)
 
         cv2.imshow(self._win, canvas)
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q'), 27):
             raise KeyboardInterrupt
         if key == ord('c'):
-            self._trail.clear()
-            self.get_logger().info("[DEBUG] trail cleared")
+            self._world_trail.clear()
+            self._robot_wx = self._robot_wy = None
+            self.get_logger().info("[DEBUG] world trail cleared")
 
 
 # ════════════════════════════════════════════════════════════════
