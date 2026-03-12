@@ -31,7 +31,6 @@ private:
     float _servo_plate_CurrentAngle = 16.3; // เก็บองศาปัจจุบันของ Servo 
     unsigned long _lastServoUpdate = 0; // เวลาที่อัปเดตองศาล่าสุด
 
-    bool _homingActive = false;      // กำลัง homing อยู่ไหม
     bool _limitTriggered = false;    // limit switch โดน trigger ไหม
 
     int desireAngle = 0; // องศาที่ต้องการ (0-270)

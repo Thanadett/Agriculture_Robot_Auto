@@ -105,22 +105,15 @@ void PlantingManager::resetPattern() {
 
 void PlantingManager::update() {
     // commands Stepper to process every steps (Non-blocking)
-    _stepper.run();
     // Serial.println(_stepper.currentPosition());
     // runStepper();
 
     // === LIMIT SWITCH GUARD ===
-    if (checkLimitSwitch()) {
-        _limitTriggered = true;
-        if (_activeMode != IDLE && !_homingActive) {
-            // Emergency stop ถ้าไม่ได้กำลัง homing
-            stopAll();
-            Serial.println("[LIMIT] Emergency stop triggered!");
-            return;
-        }
-    } else {
-        _limitTriggered = false; // reset เมื่อปล่อย
+        if (checkLimitSwitch()) {
+        _stepper.stop();
+        _stepper.setCurrentPosition(0); // ถือว่านี่คือ home
     }
+    _stepper.run();
     // ==========================
 
     if (_activeMode == IDLE) return;
@@ -313,7 +306,6 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 1000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 31: //gripper, stepper go idle, stepper go to the point 
-                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
                         _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
@@ -323,7 +315,6 @@ void PlantingManager::update() {
                         // โดน limit switch แล้ว → นี่คือ home
                         _stepper.stop();
                         _stepper.setCurrentPosition(0); // reset encoder เป็น 0
-                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
                         _previous_Millis = currentMillis;                    
@@ -331,6 +322,7 @@ void PlantingManager::update() {
                     break;
                 case 32: // จบ Pattern
                     // _isPatternRunning = false;
+                    _stepperCommandSent = false; 
                     _currentStep = 0;
                     _activeMode = IDLE;
                     // Serial.println("Plant Pattern Done!");
@@ -513,7 +505,6 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 29: //gripper, stepper go idle, stepper go to the point 
-                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
                         _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
@@ -523,7 +514,6 @@ void PlantingManager::update() {
                         // โดน limit switch แล้ว → นี่คือ home
                         _stepper.stop();
                         _stepper.setCurrentPosition(0); // reset encoder เป็น 0
-                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
                         _previous_Millis = currentMillis;                    
@@ -531,6 +521,7 @@ void PlantingManager::update() {
                     break;
                 case 30: // จบ Pattern
                     // _isPatternRunning = false;
+                    _stepperCommandSent = false; 
                     _currentStep = 0;
                     _activeMode = IDLE;
                     // Serial.println("Plant Pattern Done!");
@@ -602,7 +593,6 @@ void PlantingManager::update() {
                     if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
-                    _homingActive = true; //homing
                     if (!_stepperCommandSent) {
                         _stepper.moveTo(mmToSteps(100.0));
                         _stepperCommandSent = true;
@@ -612,13 +602,13 @@ void PlantingManager::update() {
                         // โดน limit switch แล้ว → นี่คือ home
                         _stepper.stop();
                         _stepper.setCurrentPosition(0); // reset encoder เป็น 0
-                        _homingActive = false;
                         _stepperCommandSent = false;
                         _currentStep++;
                         _previous_Millis = currentMillis;                    
                     }
                     break;
                 case 3:
+                    _stepperCommandSent = false; 
                     _currentStep = 0;
                     _activeMode = IDLE;
                     break;

@@ -55,7 +55,7 @@ void StepperLoop(void * pvParameters) {
 }
 
 void waitRobotStop() {
-  delay(50);
+  delay(100);
     while(robot.isBusy()) { 
         // ไม่ต้องเรียก robot.update() ตรงนี้ เพราะแยกไปรันที่ Core 0 แล้ว
         vTaskDelay(20 / portTICK_PERIOD_MS); 
@@ -109,6 +109,8 @@ void command_callback(const void * msgin) {
 void setup() {
   Serial.begin(115200);
   set_microros_serial_transports(Serial);
+
+  robot.begin();
     // สร้าง Task ใหม่ไปรันที่ Core 0
     xTaskCreatePinnedToCore(
         StepperLoop,    /* ชื่อฟังก์ชัน */
@@ -119,7 +121,6 @@ void setup() {
         &StepperTask,   /* Task handle */
         0               /* Core ID (0) */
     );
-  robot.begin();
 
   allocator = rcl_get_default_allocator();
   rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
