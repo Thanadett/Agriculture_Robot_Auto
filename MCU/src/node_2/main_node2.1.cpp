@@ -39,28 +39,12 @@ enum RobotCommand {
   CMD_STOP,
   CMD_PLANT1,
   CMD_PLANT2,
-  CMD_CAMUP
+  CMD_CAMUP,
+  CMD_LOAD 
 };
 
 volatile RobotCommand pending_cmd = CMD_NONE;
 
-float vision_state_val = 0;
-
-TaskHandle_t StepperTask;
-void StepperLoop(void * pvParameters) {
-  for(;;) {
-    robot.update(); // ทำงานบน Core 0 ตลอดเวลา ไม่โดน ROS ขัดจังหวะ
-    vTaskDelay(1);  // ให้ OS พักบ้างเล็กน้อย
-  }
-}
-
-void waitRobotStop() {
-  delay(100);
-    while(robot.isBusy()) { 
-        // ไม่ต้องเรียก robot.update() ตรงนี้ เพราะแยกไปรันที่ Core 0 แล้ว
-        vTaskDelay(20 / portTICK_PERIOD_MS); 
-    }
-}
 
 // ฟังก์ชันช่วยส่ง Feedback เป็น String
 void publish_feedback(const char * text) {
@@ -69,13 +53,37 @@ void publish_feedback(const char * text) {
   rcl_publish(&feedback_pub, &feedback_msg, NULL);
 }
 
+float vision_state_val = 0;
+
+TaskHandle_t StepperTask;
+void StepperLoop(void * pvParameters) {
+  for(;;) {
+    robot.update(); // ทำงานบน Core 0 ตลอดเวลา ไม่โดน ROS ขัดจังหวะ
+    vTaskDelay(pdMS_TO_TICKS(1)); 
+  }
+}
+
+void waitRobotStop() {
+  delay(50);
+    while(robot.isBusy()) { 
+        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)); // ← keep alive
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+    publish_feedback("DEBUG:robot_stopped");
+
+}
+
+
 // Callback สำหรับ vision_debug
+volatile bool cam_has_moved = false;
+
 void vision_callback(const void * msgin) {
   const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msgin;
   if (msg->data.size > 0) {
-    vision_state_val = msg->data.data[0]; // รับค่าตัวที่ 0 (state)
-    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE) {
+    vision_state_val = msg->data.data[0];
+    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE && !cam_has_moved) {
       pending_cmd = CMD_CAMUP;
+      cam_has_moved = true; // ล็อคไม่ให้ขยับซ้ำ
     }
   }
 }
@@ -104,6 +112,9 @@ void command_callback(const void * msgin) {
   else if (cmd == "DONE:planting2") {
     pending_cmd = CMD_PLANT2;
   }
+  else if (cmd == "DONE:load") { 
+    pending_cmd = CMD_LOAD;
+}
 }
 
 void setup() {
@@ -176,6 +187,7 @@ void loop() {
 
       if (cmd == CMD_RESET) {
         publish_feedback("resetting system");
+        cam_has_moved = false; 
         robot.resetPattern();
         waitRobotStop();
         publish_feedback("SUCCESS");
@@ -208,6 +220,13 @@ void loop() {
       else if (cmd == CMD_CAMUP) {
         publish_feedback("moving camera up");
         robot.mv_cam_up_pattern();
+        waitRobotStop();
+        publish_feedback("SUCCESS");
+      }
+
+      else if (cmd == CMD_LOAD) {
+        publish_feedback("loading");
+        robot.LoadPattern();
         waitRobotStop();
         publish_feedback("SUCCESS");
       }

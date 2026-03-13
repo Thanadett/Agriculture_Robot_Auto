@@ -27,8 +27,11 @@ private:
     bool _stepperCommandSent = false; 
     bool _servoCommandSent = false;
     
+    const float degree = 19.3;
     float HomeAngle = 16.3; // plate degrees
-    float _servo_plate_CurrentAngle = 16.3; // เก็บองศาปัจจุบันของ Servo 
+    float _targetAngle = 0;
+    float _servo_plate_CurrentAngle = degree; // เก็บองศาปัจจุบันของ Servo 
+    const float MAX_PLATE_ANGLE = 180.0f; 
     unsigned long _lastServoUpdate = 0; // เวลาที่อัปเดตองศาล่าสุด
 
     bool _limitTriggered = false;    // limit switch โดน trigger ไหม
