@@ -49,7 +49,7 @@ class HeadingPID(Node):
         self.declare_parameter('kp', 0.8)
         self.declare_parameter('ki', 0.0)
         self.declare_parameter('kd', 0.02)
-        self.declare_parameter('max_angular', 0.4)
+        self.declare_parameter('max_angular', 1.6)
         self.declare_parameter('enable_threshold', 0.03)
 
         self.declare_parameter('cmd_in_topic_vision', '/cmd_vel_vision')
