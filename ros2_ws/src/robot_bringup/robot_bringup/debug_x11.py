@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+Debug X11 Node — Unified Visualization
+============================================================
+แสดงข้อมูลจากทุก node ในหน้าต่างเดียว:
+  • ซ้าย  : ภาพกล้องพร้อม overlay
+  • กลาง  : World-frame map (robot vs plant) + trail path
+  • ขวา   : Mission state timeline + params
+  • ล่าง  : Real-time charts (z, bearing, v, ω, heading_error, heading_u)
+"""
+
 import math
 import collections
 import time
@@ -497,7 +507,7 @@ class DebugX11(Node):
                 wy = -float(self._v_z)
                 self._robot_wx  = wx
                 self._robot_wy  = wy
-                self._robot_yaw = float(self._v_yaw) if self._v_yaw is not None else 0.0
+                self._robot_yaw = float(self._v_bearing) if self._v_bearing is not None else 0.0
 
                 # Append ถ้าขยับพอ (threshold 0.01 m) เพื่อไม่ให้ trail หนาแน่นเกิน
                 MIN_DIST = 0.01

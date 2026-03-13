@@ -2,20 +2,13 @@
 """
 Laptop AprilTag Visual Servo — ROS2  (no X11, heading-PID compatible)
 ============================================================
-X11 debug has been moved to a dedicated debug_x11 node.
-cmd_topic default changed to /cmd_vel_vision so HeadingPID sits between
-this node and the robot (/cmd_vel_vision → heading_pid → /cmd_vel_pid).
-
-Topics subscribed:
-  /camera/image_raw/compressed  (sensor_msgs/CompressedImage)
-
-Topics published:
-  /cmd_vel_vision                      (geometry_msgs/Twist)   ← to heading_pid
-  /vision_debug                 (std_msgs/Float32MultiArray)
-  /apriltag/planting_distance   (std_msgs/Int32)
-  /apriltag/gap_type            (std_msgs/Int32)
-  /apriltag/cabbage_interval    (std_msgs/Int32)
-  /apriltag/pose                (std_msgs/Float32MultiArray)
+แก้ไข yaw direction:
+  ใช้ self.tag.x (lateral offset หลัก target_x_offset) ตอนเข้า STATE_ALIGN
+  เพราะตอนนั้น z ≈ 0.45m → x ยังมี sign ชัดเจนบอกทิศได้โดยตรง
+    x >  align_x_thresh → หุ่นอยู่ซ้าย tag → yaw_sign = -1
+    x < -align_x_thresh → หุ่นอยู่ขวา tag → yaw_sign = +1
+    |x| ≤ thresh        → ตรงกลาง         → yaw_sign = +1
+  param 'align_x_thresh' (default 0.03 m) ปรับได้ใน launch file
 """
 
 import math
@@ -59,18 +52,17 @@ STATE_NAME = {
 }
 
 # ════════════════════════════════════════════════════════════════
-# Tuning constants
+# Tuning
 # ════════════════════════════════════════════════════════════════
-Z_ALIGN   = 0.42
-Z_FORWARD = 0.38
-Z_STOP    = 0.25
+Z_ALIGN   = 0.45
+Z_FORWARD = 0.40
+Z_STOP    = 0.28
 
-APPROACH_KP     = 0.80
-APPROACH_KI     = 0.00
-APPROACH_KD     = 0.05
-APPROACH_W_MAX  = 0.30
-APPROACH_V_BASE = 0.18
-APPROACH_V_MIN  = 0.04
+APPROACH_KP        = 0.80
+APPROACH_KI        = 0.00
+APPROACH_KD        = 0.05
+APPROACH_W_MAX     = 0.30
+APPROACH_V_BASE    = 0.18
 APPROACH_BEAR_DEAD = math.radians(2.0)
 
 ALIGN_KP       = 0.60
@@ -79,6 +71,7 @@ ALIGN_KD       = 0.10
 ALIGN_W_MAX    = 0.25
 ALIGN_V        = 0.12
 ALIGN_YAW_DEAD = math.radians(2.5)
+ALIGN_STABLE_REQUIRED = 8
 
 FORWARD_V = 0.10
 SEARCH_W  = 0.00
@@ -99,7 +92,7 @@ STABLE_REQUIRED = 4
 LOST_TIMEOUT    = 4.0
 MISS_GRACE      = 5
 
-LOCK_LOST_MAX    = 15
+LOCK_LOST_MAX    = 30
 PRELOCK_REQUIRED = 3
 
 YOLO_EVERY      = 10
@@ -206,8 +199,8 @@ class YOLOGuard:
                     if self.model.names.get(cls_id, '') != self.class_name: continue
                 if conf > best_conf:
                     best_conf = conf
-                    x1,y1,x2,y2 = box.xyxy[0].tolist()
-                    best_box = (int(x1),int(y1),int(x2),int(y2))
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    best_box = (int(x1), int(y1), int(x2), int(y2))
         if best_box:
             self.bbox = best_box; self.bbox_age = 0; self.yolo_ok = True
         else:
@@ -226,11 +219,11 @@ class YOLOGuard:
         info = {'score': float('inf'), 'reason': ''}
         if self.disabled: info['reason'] = 'disabled'; return 0.0, info
         if self.bbox is None: info['reason'] = 'no_bbox'; return float('inf'), info
-        x1,y1,x2,y2 = self.bbox; m = self.margin
-        for cx,cy in corners:
-            if not (x1-m <= cx <= x2+m):
-                info['reason'] = f'x_out'; return float('inf'), info
-        centroid_y = float(np.mean(corners[:,1]))
+        x1, y1, x2, y2 = self.bbox; m = self.margin
+        for cx, cy in corners:
+            if not (x1 - m <= cx <= x2 + m):
+                info['reason'] = 'x_out'; return float('inf'), info
+        centroid_y = float(np.mean(corners[:, 1]))
         score = abs(centroid_y - y1)
         info['score'] = score; info['reason'] = 'ok'
         return score, info
@@ -252,15 +245,19 @@ class AprilTagServo(Node):
         self._init_state()
         self.get_logger().info(
             f"AprilTagServo | YOLO={'ON' if not self.yolo.disabled else 'OFF'}"
-            f" | cmd→{self._cmd_topic} | tag_id={self.target_tag_id}")
+            f" | cmd→{self._cmd_topic} | tag_id={self.target_tag_id}"
+            f" | x_offset={self._target_x_offset:.3f}m"
+            f" | align_x_thresh={self._align_x_thresh:.3f}m"
+            f" | align_stable={ALIGN_STABLE_REQUIRED}fr")
 
+    # ── Parameters ───────────────────────────────────────────────
     def _declare_params(self):
         d = self.declare_parameter
-        d('image_width', 320); d('image_height', 240)
-        d('invert_x', False);  d('invert_yaw', False)
-        d('tag_size', 0.042)
-        d('max_linear', 0.40); d('max_angular', 0.60)
-        d('cmd_topic', '/cmd_vel_vision')           # ← HeadingPID sits downstream
+        d('image_width',  320); d('image_height', 240)
+        d('invert_x',   False); d('invert_yaw',   False)
+        d('tag_size',   0.042)
+        d('max_linear', 0.40);  d('max_angular',  0.60)
+        d('cmd_topic',  '/cmd_vel_vision')
         d('yolo_model', 'best.pt')
         d('target_tag_id', -1)
         d('fx', 651.50491737); d('fy', 650.39077601)
@@ -268,25 +265,36 @@ class AprilTagServo(Node):
         d('dist_k1',  0.21581633); d('dist_k2', -1.09508649)
         d('dist_p1', -0.00213472); d('dist_p2',  0.00169510)
         d('dist_k3',  1.64003200)
+        d('target_x_offset', 0.044)
+        # ★ dead zone ของ x ตอนเข้า ALIGN
+        #   ถ้า |x| < thresh → ถือว่าตรงกลาง ไม่ invert
+        d('align_x_thresh', 0.03)
 
     def _load_params(self):
         g = self.get_parameter
         self.W = g('image_width').value; self.H = g('image_height').value
-        self.invert_x = g('invert_x').value; self.invert_yaw = g('invert_yaw').value
-        self.tag_size = g('tag_size').value
-        self.max_linear = g('max_linear').value; self.max_angular = g('max_angular').value
-        self._cmd_topic = g('cmd_topic').value
-        self._yolo_model = g('yolo_model').value
-        self.target_tag_id = int(g('target_tag_id').value)
-        self.fx = g('fx').value; self.fy = g('fy').value
-        self.cx0 = g('cx').value; self.cy0 = g('cy').value
+        self.invert_x    = g('invert_x').value
+        self.invert_yaw  = g('invert_yaw').value
+        self.tag_size    = g('tag_size').value
+        self.max_linear  = g('max_linear').value
+        self.max_angular = g('max_angular').value
+        self._cmd_topic        = g('cmd_topic').value
+        self._yolo_model       = g('yolo_model').value
+        self.target_tag_id     = int(g('target_tag_id').value)
+        self.fx  = g('fx').value;  self.fy  = g('fy').value
+        self.cx0 = g('cx').value;  self.cy0 = g('cy').value
+        self._target_x_offset  = g('target_x_offset').value
+        self._align_x_thresh   = g('align_x_thresh').value
 
     def _build_camera_model(self):
         g = self.get_parameter
-        self.K = np.array([[self.fx,0,self.cx0],[0,self.fy,self.cy0],[0,0,1]], np.float64)
-        self.D = np.array([[g('dist_k1').value, g('dist_k2').value,
-                            g('dist_p1').value, g('dist_p2').value,
-                            g('dist_k3').value]], np.float64)
+        self.K = np.array(
+            [[self.fx, 0, self.cx0], [0, self.fy, self.cy0], [0, 0, 1]],
+            np.float64)
+        self.D = np.array([[
+            g('dist_k1').value, g('dist_k2').value,
+            g('dist_p1').value, g('dist_p2').value,
+            g('dist_k3').value]], np.float64)
         self.K_new, _ = cv2.getOptimalNewCameraMatrix(
             self.K, self.D, (self.W, self.H), 1, (self.W, self.H))
         self.detector = Detector(
@@ -303,18 +311,19 @@ class AprilTagServo(Node):
         self.yolo = YOLOGuard(self._yolo_model)
 
     def _build_ros(self):
-        self.create_subscription(CompressedImage, '/camera/image_raw/compressed',
-                                 self._image_callback, 10)
-        self.cmd_pub      = self.create_publisher(Twist,             self._cmd_topic, 1)
-        self.dbg_pub      = self.create_publisher(Float32MultiArray, '/vision_debug', 5)
-        self.plant_pub    = self.create_publisher(Int32,  '/apriltag/planting_distance', 5)
-        self.gap_pub      = self.create_publisher(Int32,  '/apriltag/gap_type',          5)
-        self.interval_pub = self.create_publisher(Int32,  '/apriltag/cabbage_interval',  5)
-        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',   1)
+        self.create_subscription(
+            CompressedImage, '/camera/image_raw/compressed',
+            self._image_callback, 10)
+        self.cmd_pub      = self.create_publisher(Twist,             self._cmd_topic,               1)
+        self.dbg_pub      = self.create_publisher(Float32MultiArray, '/vision_debug',               5)
+        self.plant_pub    = self.create_publisher(Int32,             '/apriltag/planting_distance', 5)
+        self.gap_pub      = self.create_publisher(Int32,             '/apriltag/gap_type',          5)
+        self.interval_pub = self.create_publisher(Int32,             '/apriltag/cabbage_interval',  5)
+        self.pose_pub     = self.create_publisher(Float32MultiArray, '/apriltag/pose',              1)
 
     def _init_state(self):
-        self.state = STATE_SEARCH; self.frame_cnt = 0
-        self.tag = TagSmoother(alpha=0.35, window=5)
+        self.state    = STATE_SEARCH; self.frame_cnt = 0
+        self.tag      = TagSmoother(alpha=0.35, window=5)
         self.n_stable = 0; self.n_miss = 0; self.last_t = None
         self.published = False; self._last_tag_info = None
         self._sframe = 0; self._last_wdir = 1.0
@@ -325,6 +334,8 @@ class AprilTagServo(Node):
         self._yolo_frame = 0
         self.locked_tag_id = None; self.lock_lost_frames = 0
         self.prelock_id = None; self.prelock_count = 0
+        self._align_stable_frames = 0
+        self._align_yaw_sign = 1.0
 
     # ── Detection ────────────────────────────────────────────────
     def _detect(self, frame):
@@ -349,7 +360,6 @@ class AprilTagServo(Node):
                     self._yolo_frame = 0; self.yolo.update(frame)
             return None
 
-        # ── BRANCH A: locked tag ─────────────────────────────────
         if self.locked_tag_id is not None:
             locked = [d for d in dets if d.tag_id == self.locked_tag_id]
             if locked:
@@ -364,15 +374,12 @@ class AprilTagServo(Node):
                     self.prelock_id = None; self.prelock_count = 0
                     self._yolo_frame = 0; self.yolo.update(frame)
                 return None
-
-        # ── BRANCH B: pre-lock ───────────────────────────────────
         else:
             if self.target_tag_id >= 0:
                 target = [d for d in dets if d.tag_id == self.target_tag_id]
                 if not target: return None
                 best = min(target, key=lambda d: float(d.pose_t[2]))
             else:
-                # AUTO YOLO mode
                 self._yolo_frame += 1
                 if self._yolo_frame % YOLO_EVERY == 0:
                     self.yolo.update(frame)
@@ -387,33 +394,36 @@ class AprilTagServo(Node):
                 scored.sort(key=lambda t: t[0])
                 best = scored[0][1]
 
-            # Pre-lock counter
             if self.prelock_id == best.tag_id:
                 self.prelock_count += 1
             else:
                 self.prelock_id = best.tag_id; self.prelock_count = 1
-
             if self.prelock_count < PRELOCK_REQUIRED:
                 return None
 
-            self.locked_tag_id = best.tag_id; self.lock_lost_frames = 0
+            self.locked_tag_id   = best.tag_id
+            self.lock_lost_frames = 0
             self.prelock_id = None; self.prelock_count = 0
             self.get_logger().info(
                 f"[LOCK] ✓ tag_id={self.locked_tag_id}"
-                f"  z={float(best.pose_t[2]):.3f}m")
+                f"  z={float(best.pose_t[2]):.3f}m"
+                f"  tx={float(best.pose_t[0]):.3f}m")
 
         # ── Compute pose ─────────────────────────────────────────
         tx, _, tz = best.pose_t.flatten()
-        x_m = float(tx) * (-1.0 if self.invert_x else 1.0)
-        z_m = float(tz)
-        R   = best.pose_R
-        yaw = math.atan2(float(R[0,2]), float(R[2,2])) * (-1.0 if self.invert_yaw else 1.0)
+        x_raw = float(tx) * (-1.0 if self.invert_x else 1.0)
+        z_m   = float(tz)
+        R     = best.pose_R
+        yaw   = math.atan2(float(R[0, 2]), float(R[2, 2])) \
+                * (-1.0 if self.invert_yaw else 1.0)
 
+        x_m     = x_raw - self._target_x_offset
         bearing = math.atan2(x_m, max(z_m + 0.25, 0.05))
-        tag_id  = best.tag_id
+
+        tag_id = best.tag_id
         self._last_tag_info = {
             'ab': tag_id // 1000, 'c': (tag_id // 100) % 10, 'de': tag_id % 100,
-            'x': x_m, 'z': z_m, 'bearing': bearing,
+            'x': x_raw, 'z': z_m, 'bearing': bearing,
         }
         self.last_t = self.get_clock().now()
         return x_m, z_m, yaw
@@ -433,17 +443,40 @@ class AprilTagServo(Node):
         self.state = new_state; self._sframe = 0
         self._stuck_z = None; self._stuck_t = None
 
-        if new_state == STATE_APPROACH: self.pid_b.reset()
-        if new_state == STATE_ALIGN:    self.pid_y.reset()
+        if new_state == STATE_APPROACH:
+            self.pid_b.reset()
+
+        if new_state == STATE_ALIGN:
+            self.pid_y.reset()
+            self._align_stable_frames = 0
+            # ★ ใช้ self.tag.x ตอนเข้า ALIGN โดยตรง
+            #   x >  thresh → หุ่นอยู่ซ้าย tag → yaw_sign = -1
+            #   x < -thresh → หุ่นอยู่ขวา tag → yaw_sign = +1
+            #   กลาง                           → yaw_sign = +1
+            x_now = self.tag.x if self.tag.x is not None else 0.0
+            if x_now > self._align_x_thresh:
+                self._align_yaw_sign = -1.0
+                side = "LEFT"
+            elif x_now < -self._align_x_thresh:
+                self._align_yaw_sign = 1.0
+                side = "RIGHT"
+            else:
+                self._align_yaw_sign = 1.0
+                side = "CENTER"
+            self.get_logger().info(
+                f"[ALIGN] x={x_now:.3f}m → side={side}"
+                f"  yaw_sign={self._align_yaw_sign:+.0f}"
+                f"  z={self.tag.z:.3f}m")
 
         if new_state == STATE_SEARCH:
             self.published = False
             self.locked_tag_id = None; self.lock_lost_frames = 0
+            self._align_yaw_sign = 1.0
 
         if new_state == STATE_DONE and not self.published:
             info = self._last_tag_info
             if info is not None:
-                z_stop = self.tag.z if self.tag.z is not None else info['z']
+                z_stop       = self.tag.z if self.tag.z is not None else info['z']
                 bearing_stop = math.atan2(info['x'], max(z_stop, 0.05))
                 self.plant_pub.publish(Int32(data=info['ab']))
                 self.gap_pub.publish(Int32(data=info['c']))
@@ -455,19 +488,26 @@ class AprilTagServo(Node):
                 self.published = True
                 self.get_logger().info(
                     f"[DONE] AB={info['ab']} C={info['c']} DE={info['de']}"
-                    f"  z={z_stop:.3f}m")
+                    f"  z={z_stop:.3f}m  x_raw={info['x']:.3f}m"
+                    f"  offset={self._target_x_offset:.3f}m")
 
         if new_state == STATE_REVERSE:
             self._rv_t0 = self.get_clock().now().nanoseconds / 1e9
         if new_state == STATE_SCAN_BACK:
-            self._sb_t0 = self.get_clock().now().nanoseconds / 1e9
+            self._sb_t0     = self.get_clock().now().nanoseconds / 1e9
             self._sb_last_t = self._sb_t0
             self._sb_turned = 0.0; self._sb_dir = -self._last_wdir
 
     def _next_nav_state(self, z):
-        if z <= Z_STOP:    return STATE_DONE
-        if z <= Z_FORWARD: return STATE_FORWARD
-        if z <= Z_ALIGN:   return STATE_ALIGN
+        if z <= Z_STOP:
+            return STATE_DONE
+        if z <= Z_FORWARD:
+            if self.state == STATE_ALIGN and \
+                    self._align_stable_frames < ALIGN_STABLE_REQUIRED:
+                return STATE_ALIGN
+            return STATE_FORWARD
+        if z <= Z_ALIGN:
+            return STATE_ALIGN
         return STATE_APPROACH
 
     def _check_stuck(self, z):
@@ -488,12 +528,11 @@ class AprilTagServo(Node):
         s = self.state
 
         if s == STATE_SEARCH:
-            cmd.linear.x = 0.0
+            cmd.linear.x  = 0.0
             cmd.angular.z = SEARCH_W
             self._last_wdir = 1.0
 
         elif s == STATE_APPROACH:
-            # Deadband: ลด oscillation เมื่อ bearing เล็กน้อย
             if abs(bearing) < APPROACH_BEAR_DEAD:
                 self.pid_b.reset()
                 cmd.angular.z = 0.0
@@ -507,19 +546,30 @@ class AprilTagServo(Node):
             self._check_stuck(z)
 
         elif s == STATE_ALIGN:
-            if abs(yaw) < ALIGN_YAW_DEAD:
-                cmd.angular.z = 0.0; self.pid_y.reset()
+            # ★ ปรับทิศ yaw ด้วย sign ที่หาได้จาก tx ตอน lock
+            yaw_error = yaw * self._align_yaw_sign
+
+            if abs(yaw_error) < ALIGN_YAW_DEAD:
+                cmd.angular.z = 0.0
+                self.pid_y.reset()
+                self._align_stable_frames += 1
+                self.get_logger().debug(
+                    f"[ALIGN] stable {self._align_stable_frames}"
+                    f"/{ALIGN_STABLE_REQUIRED}"
+                    f"  yaw={math.degrees(yaw):.2f}°"
+                    f"  sign={self._align_yaw_sign:+.0f}")
             else:
-                raw_w = self.pid_y.update(yaw)
-                cmd.angular.z = -raw_w
+                self._align_stable_frames = 0
+                raw_w = self.pid_y.update(yaw_error)
+                cmd.angular.z = raw_w
+
             if abs(cmd.angular.z) > 0.01:
                 self._last_wdir = math.copysign(1.0, cmd.angular.z)
-            cmd.linear.x = ALIGN_V * max(0.0, math.cos(yaw))
+            cmd.linear.x = ALIGN_V * max(0.0, math.cos(yaw_error))
             self._check_stuck(z)
 
         elif s == STATE_FORWARD:
-            # linear.x > 0, angular.z = 0 → HeadingPID locks heading
-            cmd.linear.x = FORWARD_V
+            cmd.linear.x  = FORWARD_V
             cmd.angular.z = 0.0
             self._check_stuck(z)
 
@@ -532,11 +582,11 @@ class AprilTagServo(Node):
                self._sb_turned >= math.radians(SCAN_BACK_MAX_DEG):
                 cmd.angular.z = 0.0
                 self._go(STATE_SEARCH, force=True); return
-            cmd.angular.z = self._sb_dir * SCAN_BACK_W
+            cmd.angular.z    = self._sb_dir * SCAN_BACK_W
             self._sb_turned += abs(cmd.angular.z) * max(dt, 0.0)
 
         elif s == STATE_REVERSE:
-            now = self.get_clock().now().nanoseconds / 1e9
+            now  = self.get_clock().now().nanoseconds / 1e9
             elap = now - (self._rv_t0 or now)
             if elap < REVERSE_T:
                 cmd.linear.x = REVERSE_V; cmd.angular.z = 0.0
@@ -545,7 +595,7 @@ class AprilTagServo(Node):
                 self.tag.reset(); self.n_stable = 0; self.last_t = None
                 self._go(STATE_SEARCH, force=True)
 
-        else:   # DONE
+        else:  # DONE
             cmd.linear.x = cmd.angular.z = 0.0
 
     # ── Main callback ────────────────────────────────────────────
@@ -594,7 +644,8 @@ class AprilTagServo(Node):
         elif self.tag.valid and self.n_stable >= STABLE_REQUIRED:
             x, z, yaw = self.tag.x, self.tag.z, self.tag.yaw
             bearing   = self.tag.bearing
-            self._go(self._next_nav_state(z))
+            next_s    = self._next_nav_state(z)
+            self._go(next_s, force=(next_s == STATE_DONE))
             self._control(x, z, yaw, bearing, cmd)
 
         self.cmd_pub.publish(cmd)
@@ -602,14 +653,17 @@ class AprilTagServo(Node):
         dbg = Float32MultiArray()
         dbg.data = [
             float(self.state),
-            float(x)       if x       is not None else -999.0,
-            float(z)       if z       is not None else -999.0,
-            float(yaw)     if yaw     is not None else -999.0,
+            float(x)                          if x       is not None else -999.0,
+            float(z)                          if z       is not None else -999.0,
+            float(yaw)                        if yaw     is not None else -999.0,
             float(cmd.linear.x),
             float(cmd.angular.z),
             float(self.n_stable),
             float(self._stuck_n),
-            float(bearing) if bearing is not None else -999.0,
+            float(bearing)                    if bearing is not None else -999.0,
+            float(self._align_stable_frames), # index 9
+            float(self._align_yaw_sign),      # index 10  (+1/-1)
+            float(self.tag.x) if self.tag.x is not None else -999.0,  # index 11 x ตอนนี้
         ]
         self.dbg_pub.publish(dbg)
 
@@ -625,6 +679,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
