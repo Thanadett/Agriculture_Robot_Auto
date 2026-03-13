@@ -34,6 +34,8 @@ void PlantingManager::begin() {
     servo_gripper.setPeriodHertz(50);
     servo_linear.setPeriodHertz(50);
     servo_plate.setPeriodHertz(50);
+    servo_cam.setPeriodHertz(50);
+
     servo_gripper.attach(SERVO_PIN_gripper, 500, 2500); // gripper
     servo_linear.attach(SERVO_PIN_linear, 500, 2500); // linear motion
     servo_plate.attach(SERVO_PIN_plate, 500, 2500);
@@ -48,12 +50,13 @@ void PlantingManager::begin() {
     // set up Invert like before (TB6600)
     _stepper.setPinsInverted(true, true, false); 
 
-    _stepper.setMaxSpeed(1200.0);      // velocity of SUGGESTED_SPS 
+    _stepper.setMaxSpeed(1500.0);      // velocity of SUGGESTED_SPS 
     _stepper.setAcceleration(600.0); // Acceleration 
     _stepper.setMinPulseWidth(20);      // TB6600 Pulse width
 
     _stepper.setCurrentPosition(0); // home position at 0
-    servo_plate.writeMicroseconds(angleToUs(HomeAngle));}
+    servo_plate.writeMicroseconds(angleToUs(HomeAngle));
+}
 
 void PlantingManager::startPlantPattern() {
     if (_activeMode == IDLE) {
@@ -143,7 +146,6 @@ void PlantingManager::update() {
                 case 1: // Reset Servo positions
                     servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
-                    // servo_cam.write(0);
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2: //Move Stepper to idle
@@ -334,7 +336,6 @@ void PlantingManager::update() {
                 case 1: // Reset Servo positions
                     servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
-                    // servo_cam.write(0);
                     if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2: //Move Stepper to idle
@@ -529,41 +530,44 @@ void PlantingManager::update() {
             }
             break;
         case LOADING: 
-            switch (_currentStep) {
-                case 1: // Case 1 _servo_plate_CurrentAngle starts with 16.3 degrees
-                    _servo_plate_CurrentAngle = HomeAngle;
-                    servo_plate.writeMicroseconds(angleToUs(HomeAngle)); // 16.3 degrees
-                    if (elapsed_pattern >= 2000) { _currentStep++; _previous_Millis = currentMillis; }
-
+        switch (_currentStep) {
+            case 1:
+                // ตรวจสอบว่าเกิน limit ไหม
+                if (_servo_plate_CurrentAngle + degree > MAX_PLATE_ANGLE) {
+                    // เต็มแล้ว ไม่ขยับอีก
+                    _activeMode = IDLE;
+                    _currentStep = 0;
                     break;
-                case 2: // ค่อยๆ ขยับทีละ 16.3 องศา (Smooth Move)
-                // ตรวจสอบว่าถึงเวลาอัปเดตองศาหรือยัง (คล้าย delay(1) แต่ไม่ block)
-                    if (currentMillis - _lastServoUpdate >= 15) { 
-                        _lastServoUpdate = currentMillis;
-                        if (_servo_plate_CurrentAngle < 16.3*2) {
-                            _servo_plate_CurrentAngle += 0.8; // ความเร็วการขยับ
-                            servo_plate.writeMicroseconds(angleToUs(_servo_plate_CurrentAngle));
-                        } else {
-                        if (elapsed_pattern >= 1000) { _currentStep++; _previous_Millis = currentMillis; }
-                        }
+                }
+                _targetAngle = _servo_plate_CurrentAngle + degree;
+                _currentStep++;
+                _previous_Millis = currentMillis;
+                break;
+            case 2:
+                if (currentMillis - _lastServoUpdate >= 15) { 
+                    _lastServoUpdate = currentMillis;
+                    if (_servo_plate_CurrentAngle < _targetAngle) {
+                        _servo_plate_CurrentAngle += 0.8;
+                        servo_plate.writeMicroseconds(angleToUs(_servo_plate_CurrentAngle));
+                    } else {
+                        _currentStep++;
+                        _previous_Millis = currentMillis;
                     }
-                    break;
-                case 3:
-                    // servo_plate.writeMicroseconds(angleToUs(HomeAngle));
-                    if (elapsed_pattern >= 1000) { 
-                    // Serial.println("Loading System Done!");
+                }
+                break;
+            case 3:
+                if (elapsed_pattern >= 500) { 
                     _activeMode = IDLE; 
                     _currentStep = 0;   
-                    _previous_Millis = currentMillis; 
-                    }
-                    break;
-            }
-            break;
+                }
+                break;
+        }
+        break;
         case MOVECAM_UP: 
             switch (_currentStep) {
                 case 1: // 
                     servo_cam.write(0);
-                    if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
+                    if (elapsed_pattern >= 3000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
                     _currentStep = 0;
@@ -589,8 +593,9 @@ void PlantingManager::update() {
                     servo_cam.write(140);
                     servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
+                    _servo_plate_CurrentAngle = HomeAngle; //32.73
                     servo_plate.writeMicroseconds(angleToUs(HomeAngle));
-                    if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
+                    if (elapsed_pattern >= 3000) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
                     if (!_stepperCommandSent) {
