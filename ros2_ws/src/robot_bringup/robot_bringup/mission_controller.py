@@ -1,70 +1,59 @@
 #!/usr/bin/env python3
-"""
-Mission Controller Node
-============================================================
-(Same as previous version — added /mission_debug Int32 publisher
- so debug_x11 can display current mission state.)
 
-Topics subscribed:
-  /vision_debug               (Float32MultiArray)
-  /apriltag/pose              (Float32MultiArray)
-  /apriltag/planting_distance (Int32)
-  /apriltag/gap_type          (Int32)
-  /apriltag/cabbage_interval  (Int32)
-  /wheel_ticks                (Float32MultiArray)  [FL,FR,RL,RR] cm
-  /plant_feedback             (String)  → "SUCCESS"
-  /capture_feedback           (String)  → "SUCCESS"
-
-Topics published:
-  /cmd_vel   (Twist)
-  /msg               (String)   DONE:planting / DONE:cabbage / FINISH
-  /mission_debug     (Int32)    current MS_* state (for debug_x11)
-"""
-
+import math
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray, Int32, String
 
 # ════════════════════════════════════════════════════════════════
+# Distance thresholds — ปรับได้ตามพฤติกรรมจริงของหุ่น
+# ════════════════════════════════════════════════════════════════
+STOP_THRESH  = 0.003   # หยุดเมื่อเหลือ 3mm  (เดิม 10mm)
+SLOW_1_DIST  = 0.08    # เริ่ม slow zone 1 ที่ 8cm เหลือ
+SLOW_1_FRAC  = 0.40    # 40% ของ full speed
+SLOW_2_DIST  = 0.03    # เริ่ม slow zone 2 ที่ 3cm เหลือ
+SLOW_2_FRAC  = 0.20    # 20% ของ full speed
+
+# ════════════════════════════════════════════════════════════════
 # States
 # ════════════════════════════════════════════════════════════════
-MS_IDLE          = 0
-MS_WAIT_0        = 1
-MS_APPROACH      = 2
-MS_WAIT_APPROACH = 3
-MS_REVERSE       = 4
-MS_WAIT_REVERSE  = 5
-MS_PLANT_1       = 6
-MS_WAIT_1        = 7
-MS_PLANT_2       = 8
-MS_WAIT_2        = 9
-MS_GAP           = 10
-MS_WAIT_3        = 11
-MS_INTERVAL_1    = 12
-MS_WAIT_4A       = 13
-MS_INTERVAL_2    = 14
-MS_WAIT_4B       = 15
-MS_FINISH        = 16
+MS_IDLE           = 0
+MS_WAIT_0         = 1
+MS_APPROACH       = 2
+MS_WAIT_APPROACH  = 3
+MS_REVERSE        = 4
+MS_WAIT_REVERSE   = 5
+MS_PLANT_1        = 6
+MS_WAIT_1         = 7
+MS_PLANT_2        = 8
+MS_WAIT_2         = 9
+MS_GAP            = 10
+MS_WAIT_3         = 11
+MS_INTERVAL_1     = 12
+MS_WAIT_4A        = 13
+MS_INTERVAL_2     = 14
+MS_WAIT_4B        = 15
+MS_FINISH         = 16
 
 MS_NAME = {
-    MS_IDLE:         "IDLE",
-    MS_WAIT_0:       "WAIT_0",
-    MS_APPROACH:     "APPROACH",
+    MS_IDLE:          "IDLE",
+    MS_WAIT_0:        "WAIT_0",
+    MS_APPROACH:      "APPROACH",
     MS_WAIT_APPROACH: "WAIT_APPROACH",
-    MS_REVERSE:      "REVERSE",
-    MS_WAIT_REVERSE: "WAIT_REVERSE",
-    MS_PLANT_1:      "PLANT_1",
-    MS_WAIT_1:       "WAIT_1",
-    MS_PLANT_2:      "PLANT_2",
-    MS_WAIT_2:       "WAIT_2",
-    MS_GAP:          "GAP",
-    MS_WAIT_3:       "WAIT_3",
-    MS_INTERVAL_1:   "INTERVAL_1",
-    MS_WAIT_4A:      "WAIT_4A",
-    MS_INTERVAL_2:   "INTERVAL_2",
-    MS_WAIT_4B:      "WAIT_4B",
-    MS_FINISH:       "FINISH",
+    MS_REVERSE:       "REVERSE",
+    MS_WAIT_REVERSE:  "WAIT_REVERSE",
+    MS_PLANT_1:       "PLANT_1",
+    MS_WAIT_1:        "WAIT_1",
+    MS_PLANT_2:       "PLANT_2",
+    MS_WAIT_2:        "WAIT_2",
+    MS_GAP:           "GAP",
+    MS_WAIT_3:        "WAIT_3",
+    MS_INTERVAL_1:    "INTERVAL_1",
+    MS_WAIT_4A:       "WAIT_4A",
+    MS_INTERVAL_2:    "INTERVAL_2",
+    MS_WAIT_4B:       "WAIT_4B",
+    MS_FINISH:        "FINISH",
 }
 
 APRILTAG_STATE_DONE = 4
@@ -84,32 +73,40 @@ class MissionController(Node):
             f" | cmd={self._cmd_topic}"
             f" | camera_target_z={self._camera_target_z}m"
             f" | reverse={self._reverse_after_m}m"
-            f" | wait={self._wait_sec}s")
+            f" | wait={self._wait_sec}s"
+            f" | ticks_unit={self._ticks_unit}"
+            f" | stop_thresh={STOP_THRESH*100:.1f}mm"
+            f" | slow1={SLOW_1_DIST*100:.0f}cm@{int(SLOW_1_FRAC*100)}%"
+            f" | slow2={SLOW_2_DIST*100:.0f}cm@{int(SLOW_2_FRAC*100)}%")
 
+    # ── Parameters ───────────────────────────────────────────────
     def _declare_params(self):
-        import math
         d = self.declare_parameter
-        d('wheel_diameter',  0.127)
-        d('ticks_per_rev',   5940)
-        d('forward_vel',     0.10)
-        d('reverse_vel',     0.10)
-        d('camera_target_z', 0.50)
-        d('reverse_after_m', 0.40)
-        d('wait_sec',        3.0)
-        d('cmd_topic',       '/cmd_vel_mission')
+        d('wheel_diameter',    0.127)
+        d('ticks_per_rev',     5940)
+        d('forward_vel',       0.20)
+        d('reverse_vel',       0.20)
+        d('camera_target_z',   0.50)
+        d('reverse_after_m',   0.40)
+        d('wait_sec',          2.0)
+        d('cmd_topic',         '/cmd_vel_mission')
+        d('ticks_unit',        'cm')
+        d('encoder_noise_cm',  0.5)
 
     def _load_params(self):
-        import math
         g = self.get_parameter
-        self._wheel_circ       = math.pi * g('wheel_diameter').value
-        self._ticks_per_rev    = int(g('ticks_per_rev').value)
-        self._forward_vel      = g('forward_vel').value
-        self._reverse_vel      = g('reverse_vel').value
-        self._camera_target_z  = g('camera_target_z').value
-        self._reverse_after_m  = g('reverse_after_m').value
-        self._wait_sec         = g('wait_sec').value
-        self._cmd_topic        = g('cmd_topic').value
+        self._wheel_circ        = math.pi * g('wheel_diameter').value
+        self._ticks_per_rev     = int(g('ticks_per_rev').value)
+        self._forward_vel       = g('forward_vel').value
+        self._reverse_vel       = g('reverse_vel').value
+        self._camera_target_z   = g('camera_target_z').value
+        self._reverse_after_m   = g('reverse_after_m').value
+        self._wait_sec          = g('wait_sec').value
+        self._cmd_topic         = g('cmd_topic').value
+        self._ticks_unit        = g('ticks_unit').value
+        self._encoder_noise_cm  = g('encoder_noise_cm').value
 
+    # ── ROS I/O ──────────────────────────────────────────────────
     def _build_ros(self):
         self.create_subscription(Float32MultiArray, '/vision_debug',
                                  self._cb_vision_debug, 10)
@@ -127,26 +124,29 @@ class MissionController(Node):
                                  self._cb_plant_feedback, 10)
         self.create_subscription(String, '/capture_feedback',
                                  self._cb_capture_feedback, 10)
-        
-        self._cmd_pub     = self.create_publisher(Twist,  self._cmd_topic, 1)
-        self._msg_pub     = self.create_publisher(String, '/msg',          10)
-        self._ms_dbg_pub  = self.create_publisher(Int32,  '/mission_debug', 5)
 
+        self._cmd_pub    = self.create_publisher(Twist,  self._cmd_topic,   1)
+        self._msg_pub    = self.create_publisher(String, '/msg',            10)
+        self._ms_dbg_pub = self.create_publisher(Int32,  '/mission_debug',  5)
+
+    # ── State init ───────────────────────────────────────────────
     def _init_state(self):
-        self._ms           = MS_IDLE
-        self._wait_start   = None
-        self._apriltag_state  = -1
-        self._pose_z          = None
-        self._plant_dist_cm   = None
-        self._gap_cm          = None
-        self._interval_cm     = None
-        self._ticks_now       = 0.0
-        self._ticks_ref       = 0.0
-        self._target_m        = 0.0
-        self._approach_m      = 0.0
-        self._done_triggered  = False
+        self._ms                  = MS_IDLE
+        self._wait_start          = None
+        self._apriltag_state      = -1
+        self._pose_z              = None
+        self._plant_dist_cm       = None
+        self._gap_cm              = None
+        self._interval_cm         = None
+        self._odometry_m          = 0.0
+        self._odom_ref_m          = 0.0
+        self._target_abs_m        = 0.0   # ★ absolute target position
+        self._target_m            = 0.0   # relative distance (เก็บไว้สำหรับ log)
+        self._approach_m          = 0.0
+        self._done_triggered      = False
         self._plant_feedback_ok   = False
         self._capture_feedback_ok = False
+        self._ticks_last_raw      = None
 
     # ── Callbacks ────────────────────────────────────────────────
     def _cb_vision_debug(self, msg):
@@ -162,75 +162,102 @@ class MissionController(Node):
         self.get_logger().info(f"[PARAM] planting_distance={self._plant_dist_cm}cm")
 
     def _cb_gap(self, msg):
-        gap_code = int(msg.data)
-        gap_table = {
-            1: 5,
-            2: 10,
-            3: 15,
-            4: 20,
-            5: 25
-        }
-        if gap_code in gap_table:
-            self._gap_cm = gap_table[gap_code]
-        else:
+        gap_code  = int(msg.data)
+        gap_table = {1: 5, 2: 10, 3: 15, 4: 20, 5: 25}
+        self._gap_cm = gap_table.get(gap_code, 10)
+        if gap_code not in gap_table:
             self.get_logger().warn(f"[GAP] unknown code {gap_code}, default 10cm")
-            self._gap_cm = 10
-        self.get_logger().info(
-            f"[PARAM] gap_type={gap_code} → {self._gap_cm} cm")
+        self.get_logger().info(f"[PARAM] gap_type={gap_code} → {self._gap_cm}cm")
 
     def _cb_interval(self, msg):
         self._interval_cm = int(msg.data)
         self.get_logger().info(f"[PARAM] cabbage_interval={self._interval_cm}cm")
 
     def _cb_ticks(self, msg):
-        if len(msg.data) >= 4:
-            self._ticks_now = float(sum(msg.data[:4]) / 4.0) / 100.0
-        elif len(msg.data) > 0:
-            self._ticks_now = float(msg.data[0]) / 100.0
+        if len(msg.data) == 0:
+            return
+        n_wheels = min(4, len(msg.data))
+        avg_raw  = sum(abs(float(v)) for v in msg.data[:n_wheels]) / n_wheels
+
+        if self._ticks_unit == 'cm':
+            if self._ticks_last_raw is None:
+                self._ticks_last_raw = avg_raw
+                return
+            delta_cm = avg_raw - self._ticks_last_raw
+            self._ticks_last_raw = avg_raw
+            if delta_cm < -self._encoder_noise_cm:
+                self.get_logger().warn(
+                    f"[TICKS] encoder reset delta={delta_cm:.3f}cm, skip")
+                return
+            self._odometry_m += max(0.0, delta_cm) / 100.0
+
+        elif self._ticks_unit == 'cm_inc':
+            self._odometry_m += avg_raw / 100.0
+
+        elif self._ticks_unit == 'ticks':
+            meters_per_tick   = self._wheel_circ / self._ticks_per_rev
+            self._odometry_m += avg_raw * meters_per_tick
 
     def _cb_plant_feedback(self, msg):
         if msg.data.strip().upper() == "SUCCESS":
             self.get_logger().info(
-                f"[FEEDBACK] /plant_feedback SUCCESS  ({MS_NAME[self._ms]})")
+                f"[FEEDBACK] plant SUCCESS ({MS_NAME[self._ms]})")
             self._plant_feedback_ok = True
 
     def _cb_capture_feedback(self, msg):
         if msg.data.strip().upper() == "SUCCESS":
             self.get_logger().info(
-                f"[FEEDBACK] /capture_feedback SUCCESS  ({MS_NAME[self._ms]})")
+                f"[FEEDBACK] capture SUCCESS ({MS_NAME[self._ms]})")
             self._capture_feedback_ok = True
-            
 
     # ── Helpers ──────────────────────────────────────────────────
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
 
-    def _travelled_m(self):
-        return abs(self._ticks_now - self._ticks_ref)
+    def _remaining_m(self):
+        """ระยะทางที่เหลือถึง target (ใช้ absolute position)"""
+        return self._target_abs_m - self._odometry_m
 
-    def _start_move(self, target_m):
-        self._ticks_ref = self._ticks_now
-        self._target_m  = target_m
-        self.get_logger().info(f"[MOVE] target={target_m:.3f}m")
+    def _start_move(self, dist_m):
+        """กำหนด target ใหม่ในหน่วย absolute odometry"""
+        self._odom_ref_m   = self._odometry_m
+        self._target_m     = dist_m
+        self._target_abs_m = self._odometry_m + dist_m
+        self.get_logger().info(
+            f"[MOVE] dist={dist_m*100:.1f}cm"
+            f"  abs_target={self._target_abs_m:.4f}m"
+            f"  odom_now={self._odometry_m:.4f}m")
 
-    def _stop(self):    self._cmd_pub.publish(Twist())
-    def _forward(self):
-        remaining = self._target_m - self._travelled_m()
-        cmd = Twist()
+    def _stop(self):
+        self._cmd_pub.publish(Twist())
 
-        slow_zone = 0.05     # 5 cm
-        stop_zone = 0.01     # 1 cm
-
-        if remaining <= stop_zone:
-            cmd.linear.x = 0.0
-        elif remaining < slow_zone:
-            cmd.linear.x = self._forward_vel * 0.3
+    def _calc_speed(self, remaining, full_speed):
+        """คำนวณความเร็วตาม 2-stage slow zone"""
+        if remaining <= STOP_THRESH:
+            return 0.0
+        elif remaining < SLOW_2_DIST:
+            return full_speed * SLOW_2_FRAC   
+        elif remaining < SLOW_1_DIST:
+            return full_speed * SLOW_1_FRAC   
         else:
-            cmd.linear.x = self._forward_vel
+            return full_speed                  
+
+    def _forward(self):
+        remaining = self._remaining_m()
+        cmd = Twist()
+        cmd.linear.x = self._calc_speed(remaining, self._forward_vel)
         self._cmd_pub.publish(cmd)
+        # log เมื่อเข้า slow zone
+        if remaining < SLOW_1_DIST:
+            self.get_logger().debug(
+                f"[SLOW] rem={remaining*100:.1f}cm  v={cmd.linear.x:.3f}")
 
     def _reverse_cmd(self):
-        cmd = Twist(); cmd.linear.x = -self._reverse_vel; self._cmd_pub.publish(cmd)
+        remaining = self._remaining_m()
+        cmd = Twist()
+        spd = self._calc_speed(remaining, self._reverse_vel)
+        cmd.linear.x = -spd
+        self._cmd_pub.publish(cmd)
 
     def _pub_msg(self, text):
         msg = String(); msg.data = text
@@ -239,12 +266,14 @@ class MissionController(Node):
 
     def _go(self, new_state):
         self.get_logger().info(
-            f"[MS] {MS_NAME[self._ms]} → {MS_NAME[new_state]}")
+            f"[MS] {MS_NAME[self._ms]} → {MS_NAME[new_state]}"
+            f"  (odom={self._odometry_m:.4f}m)")
         self._ms = new_state
-        self._ms_dbg_pub.publish(Int32(data=new_state))  # ← debug_x11 用
+        self._ms_dbg_pub.publish(Int32(data=new_state))
 
     def _start_wait(self):
-        self._stop(); self._wait_start = self._now()
+        self._stop()
+        self._wait_start = self._now()
 
     def _wait_done(self):
         return (self._now() - self._wait_start) >= self._wait_sec
@@ -254,10 +283,25 @@ class MissionController(Node):
                 self._gap_cm        is not None and
                 self._interval_cm   is not None)
 
+    def _reached(self):
+        """หยุดแล้วหรือยัง (ใช้ remaining แทน travelled)"""
+        return self._remaining_m() <= STOP_THRESH
+
     # ── Main tick ────────────────────────────────────────────────
     def _tick(self):
 
+        # ── IDLE ─────────────────────────────────────────────────
         if self._ms == MS_IDLE:
+            now = self._now()
+            if not hasattr(self, '_last_idle_log') or \
+                    (now - self._last_idle_log) > 2.0:
+                self._last_idle_log = now
+                self.get_logger().info(
+                    f"[IDLE CHECK] apriltag={self._apriltag_state}"
+                    f" pose_z={self._pose_z}"
+                    f" plant={self._plant_dist_cm}"
+                    f" gap={self._gap_cm}"
+                    f" interval={self._interval_cm}")
             if (self._apriltag_state == APRILTAG_STATE_DONE
                     and not self._done_triggered
                     and self._params_ready()
@@ -266,12 +310,19 @@ class MissionController(Node):
                 self.get_logger().info(
                     f"[TRIGGER] DONE  z={self._pose_z:.3f}m"
                     f"  plant={self._plant_dist_cm}cm"
-                    f"  gap={self._gap_cm}cm  interval={self._interval_cm}cm")
-                self._go(MS_WAIT_0); self._start_wait()
+                    f"  gap={self._gap_cm}cm"
+                    f"  interval={self._interval_cm}cm")
+                self._go(MS_WAIT_0)
+                self._start_wait()
             return
 
+        # ── WAIT_0 ───────────────────────────────────────────────
         elif self._ms == MS_WAIT_0:
             if self._wait_done():
+                if self._pose_z is None:
+                    self.get_logger().warn("[WAIT_0] pose_z still None, waiting...")
+                    self._wait_start = self._now()
+                    return
                 approach_m = max(0.0, self._camera_target_z - self._pose_z)
                 if approach_m < 0.005:
                     self._approach_m = 0.0
@@ -282,118 +333,182 @@ class MissionController(Node):
                     self._go(MS_APPROACH)
                     self._start_move(approach_m)
 
+        # ── APPROACH ─────────────────────────────────────────────
         elif self._ms == MS_APPROACH:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] APPROACH done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={( actual - self._target_m)*100:.1f}cm")
                 self._go(MS_WAIT_APPROACH)
                 self._start_wait()
             else:
                 self._forward()
-        
+
+        # ── WAIT_APPROACH ────────────────────────────────────────
         elif self._ms == MS_WAIT_APPROACH:
             if self._wait_done():
                 reverse_m = max(0.0, self._reverse_after_m - self._approach_m)
                 self._go(MS_REVERSE)
                 self._start_move(reverse_m)
 
+        # ── REVERSE ──────────────────────────────────────────────
         elif self._ms == MS_REVERSE:
-            if self._travelled_m() >= (self._target_m - 0.01):
-                self._go(MS_WAIT_REVERSE); self._start_wait()
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] REVERSE done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
+                self._go(MS_WAIT_REVERSE)
+                self._start_wait()
             else:
                 self._reverse_cmd()
 
+        # ── WAIT_REVERSE ─────────────────────────────────────────
         elif self._ms == MS_WAIT_REVERSE:
             if self._wait_done():
                 self._go(MS_PLANT_1)
                 self._start_move(self._plant_dist_cm / 100.0)
 
+        # ── PLANT_1 ──────────────────────────────────────────────
         elif self._ms == MS_PLANT_1:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] PLANT_1 done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
                 self._stop()
                 self._plant_feedback_ok = False
-                self._go(MS_WAIT_1); self._start_wait()
+                self._go(MS_WAIT_1)
+                self._start_wait()
                 self._pub_msg("DONE:planting1")
             else:
                 self._forward()
 
+        # ── WAIT_1 ───────────────────────────────────────────────
         elif self._ms == MS_WAIT_1:
             if self._wait_done() and self._plant_feedback_ok:
                 self._plant_feedback_ok = False
                 self._go(MS_PLANT_2)
                 self._start_move(self._plant_dist_cm / 100.0)
             elif self._wait_done():
-                self.get_logger().warn("[WAIT_1] waiting for /plant_feedback SUCCESS...")
+                self.get_logger().warn("[WAIT_1] waiting for /plant_feedback...")
 
+        # ── PLANT_2 ──────────────────────────────────────────────
         elif self._ms == MS_PLANT_2:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] PLANT_2 done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
                 self._stop()
                 self._plant_feedback_ok = False
-                self._go(MS_WAIT_2); self._start_wait()
+                self._go(MS_WAIT_2)
+                self._start_wait()
                 self._pub_msg("DONE:planting2")
             else:
                 self._forward()
 
+        # ── WAIT_2 ───────────────────────────────────────────────
         elif self._ms == MS_WAIT_2:
             if self._wait_done() and self._plant_feedback_ok:
                 self._plant_feedback_ok = False
                 self._go(MS_GAP)
                 self._start_move(self._gap_cm / 100.0)
             elif self._wait_done():
-                self.get_logger().warn("[WAIT_2] waiting for /plant_feedback SUCCESS...")
+                self.get_logger().warn("[WAIT_2] waiting for /plant_feedback...")
 
+        # ── GAP ──────────────────────────────────────────────────
         elif self._ms == MS_GAP:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] GAP done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
                 self._stop()
                 self._capture_feedback_ok = False
-                self._go(MS_WAIT_3); self._start_wait()
+                self._go(MS_WAIT_3)
+                self._start_wait()
                 self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
+        # ── WAIT_3 ───────────────────────────────────────────────
         elif self._ms == MS_WAIT_3:
             if self._wait_done() and self._capture_feedback_ok:
                 self._capture_feedback_ok = False
                 self._go(MS_INTERVAL_1)
                 self._start_move(self._interval_cm / 100.0)
             elif self._wait_done():
-                self.get_logger().warn("[WAIT_3] waiting for /capture_feedback SUCCESS...")
+                self.get_logger().warn("[WAIT_3] waiting for /capture_feedback...")
 
+        # ── INTERVAL_1 ───────────────────────────────────────────
         elif self._ms == MS_INTERVAL_1:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] INTERVAL_1 done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
                 self._stop()
                 self._capture_feedback_ok = False
-                self._go(MS_WAIT_4A); self._start_wait()
+                self._go(MS_WAIT_4A)
+                self._start_wait()
                 self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
+        # ── WAIT_4A ──────────────────────────────────────────────
         elif self._ms == MS_WAIT_4A:
             if self._wait_done() and self._capture_feedback_ok:
                 self._capture_feedback_ok = False
                 self._go(MS_INTERVAL_2)
                 self._start_move(self._interval_cm / 100.0)
             elif self._wait_done():
-                self.get_logger().warn("[WAIT_4A] waiting for /capture_feedback SUCCESS...")
+                self.get_logger().warn("[WAIT_4A] waiting for /capture_feedback...")
 
+        # ── INTERVAL_2 ───────────────────────────────────────────
         elif self._ms == MS_INTERVAL_2:
-            if self._travelled_m() >= (self._target_m - 0.01):
+            if self._reached():
+                actual = self._odometry_m - self._odom_ref_m
+                self.get_logger().info(
+                    f"[STOP] INTERVAL_2 done"
+                    f"  target={self._target_m*100:.1f}cm"
+                    f"  actual={actual*100:.1f}cm"
+                    f"  err={(actual - self._target_m)*100:.1f}cm")
                 self._stop()
                 self._capture_feedback_ok = False
-                self._go(MS_WAIT_4B); self._start_wait()
+                self._go(MS_WAIT_4B)
+                self._start_wait()
                 self._pub_msg("DONE:cabbage")
             else:
                 self._forward()
 
+        # ── WAIT_4B ──────────────────────────────────────────────
         elif self._ms == MS_WAIT_4B:
             if self._wait_done() and self._capture_feedback_ok:
                 self._capture_feedback_ok = False
                 self._go(MS_FINISH)
             elif self._wait_done():
-                self.get_logger().warn("[WAIT_4B] waiting for /capture_feedback SUCCESS...")
+                self.get_logger().warn("[WAIT_4B] waiting for /capture_feedback...")
 
+        # ── FINISH ───────────────────────────────────────────────
         elif self._ms == MS_FINISH:
             self._stop()
             self._pub_msg("FINISH")
-            self.get_logger().info("[MISSION] FINISH")
+            self.get_logger().info(
+                f"[MISSION] FINISH  total_odom={self._odometry_m:.3f}m")
             self.timer.cancel()
 
 
@@ -407,6 +522,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

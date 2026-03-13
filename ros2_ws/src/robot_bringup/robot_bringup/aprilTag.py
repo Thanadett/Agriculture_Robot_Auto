@@ -21,7 +21,7 @@ class AprilTagCamera(Node):
         self.tag_size = 0.04
 
         # ---------------- Camera ----------------
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(4)
         self.cap.set(3, 640)
         self.cap.set(4, 480)
 
