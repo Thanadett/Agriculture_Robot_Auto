@@ -1,5 +1,5 @@
 """
-Green Circle Detector v4 — Hollow circle (green edge only)
+Green Circle Detector v4.2 — Hollow circle (green edge only)
 ===========================================================
 [Updated] Process every 5 frames + show only circles with diameter >= 20 cm
           Camera distance: 28 cm
@@ -18,14 +18,25 @@ Green Circle Detector v4 — Hollow circle (green edge only)
               2. Fill Color Check — inside of circle must be mostly green (>= CABBAGE_FILL_MIN)
               Both filters must pass before entering MEASURE stage.
               Use --no-cabbage-filter to disable for debugging.
+
+[v4.2 Change]
+  - Detection gate: locked at startup, unlocked by "startc" on /plant_feedback.
+    Waits PLANTING_WARMUP_SEC before detection starts.
+  - Measurement log: every capture appends diameter to running session list and
+    publishes "LOG:[d1 d2 ...]" to /msg topic (ROS2 mode).
+    Camera-only mode prints log to terminal instead.
+  - skimage lazy import: imported inside arc_hog_score() only — node starts even
+    if scikit-image is not installed in the system Python.
+  - Default mode: if no --ros2 / --camera / --image argument given, defaults to
+    --ros2 automatically (suitable for ROS2 entry-point launch).
 """
 
+import csv
 import cv2
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from skimage.feature import hog
 import argparse
 import random
 import sys
@@ -36,7 +47,7 @@ import os
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════
 SAVE_DIR           = "green_circle_pictures"
-CENTER_TOL         = 150     # px — centerline tolerance
+CENTER_TOL         = 150    # px — centerline tolerance
 NEAR_LINE_RANGE    = 120    # px
 CAPTURE_COOLDOWN   = 3.0    # seconds — global cooldown after each capture
 
@@ -68,9 +79,9 @@ PROCESS_EVERY_N_FRAMES = 4
 #  DETECTION GATE PARAMETERS  [v4.2]
 # ══════════════════════════════════════════════════════════════
 # Detection is LOCKED at startup.
-# Unlocked only after receiving DONE:planting2 on /msg topic.
+# Unlocked only after receiving "startc" on /plant_feedback topic.
 # After receiving, waits PLANTING_WARMUP_SEC before detection starts.
-PLANTING_WARMUP_SEC = 5.0   # seconds to wait after DONE:planting2 before detecting
+PLANTING_WARMUP_SEC = 5.0   # seconds to wait after startc before detecting
 
 # ══════════════════════════════════════════════════════════════
 #  CABBAGE VALIDATION PARAMETERS  [v4.1]
@@ -80,12 +91,51 @@ PLANTING_WARMUP_SEC = 5.0   # seconds to wait after DONE:planting2 before detect
 CABBAGE_SOLIDITY_MIN  = 0.85   # minimum solidity to pass
 
 # Fill ratio = fraction of pixels INSIDE the detected circle that are green (HSV)
-# Cabbage model is fully green inside → high ratio
-# Other objects with only a green edge → low ratio
 CABBAGE_FILL_MIN      = 0.40   # minimum green fill ratio to pass (0.0–1.0)
 
 # Enable/disable cabbage filter globally (overridden by --no-cabbage-filter)
 CABBAGE_FILTER_ENABLED = True
+
+# ══════════════════════════════════════════════════════════════
+#  SESSION MEASUREMENT LOG  [v4.2]
+# ══════════════════════════════════════════════════════════════
+_measurement_log: list = []   # running list of diameter_cm values this session
+DEFAULT_LOG_FILE = os.path.join(SAVE_DIR, "measurement_log.csv")
+
+
+def log_measurement(diameter_cm, log_file=DEFAULT_LOG_FILE, ros2_publisher=None):
+    """
+    Append diameter_cm to the in-memory session log.
+    Also appends a row to CSV for persistence.
+
+    ROS2 mode  : publishes "LOG:[d1 d2 ...]" to /msg via ros2_publisher.
+    Camera mode: prints running log to terminal.
+    """
+    _measurement_log.append(round(diameter_cm, 2))
+
+    values_str = " ".join(f"{v:.2f}" for v in _measurement_log)
+    log_msg    = f"LOG:[{values_str}]"
+
+    if ros2_publisher is not None:
+        from std_msgs.msg import String as RosString
+        out = RosString()
+        out.data = log_msg
+        ros2_publisher.publish(out)
+    else:
+        print(f"\n{'─'*55}")
+        print(f"  [MEASUREMENT LOG] {len(_measurement_log)} capture(s) this session:")
+        print(f"  [{values_str}]")
+        print(f"{'─'*55}")
+
+    # Always append to CSV
+    ensure_save_dir()
+    file_exists = os.path.isfile(log_file)
+    with open(log_file, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["capture_index", "diameter_cm", "timestamp"])
+        writer.writerow([len(_measurement_log), round(diameter_cm, 2),
+                         time.strftime("%Y-%m-%d %H:%M:%S")])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -118,9 +168,17 @@ def green_canny(bgr_img, green_mask):
 
 
 # ══════════════════════════════════════════════════════════════
-#  C. HOG ARC SCORE
+#  C. HOG ARC SCORE  [v4.2 — lazy skimage import]
 # ══════════════════════════════════════════════════════════════
 def arc_hog_score(gray_roi):
+    try:
+        from skimage.feature import hog
+    except ImportError:
+        raise ImportError(
+            "[ERROR] scikit-image not found.\n"
+            "Install with:  pip install scikit-image\n"
+            "or:            pip install scikit-image --break-system-packages"
+        )
     h, w = gray_roi.shape
     if h < 16 or w < 16:
         return 0.0
@@ -264,17 +322,10 @@ def detect_green_circles(bgr_img,
 #  F2. CABBAGE VALIDATION FILTERS  [v4.1]
 # ══════════════════════════════════════════════════════════════
 def compute_solidity(bgr_img, cx, cy, r):
-    """
-    Solidity = contour area / convex hull area.
-    Extracts the green mask ROI around the detected circle and computes
-    solidity of the largest contour found. High solidity = compact/round shape.
-    Returns float 0.0–1.0 (returns 0.0 on failure).
-    """
     img_h, img_w = bgr_img.shape[:2]
     ir = int(round(r))
     icx, icy = int(round(cx)), int(round(cy))
 
-    # Crop ROI around circle with small padding
     pad = 4
     x1 = max(0, icx - ir - pad)
     y1 = max(0, icy - ir - pad)
@@ -287,7 +338,6 @@ def compute_solidity(bgr_img, cx, cy, r):
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     green_roi = cv2.inRange(hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
 
-    # Morphological cleanup
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     green_roi = cv2.morphologyEx(green_roi, cv2.MORPH_CLOSE, k)
 
@@ -296,7 +346,6 @@ def compute_solidity(bgr_img, cx, cy, r):
     if not contours:
         return 0.0
 
-    # Use the largest contour
     cnt = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(cnt)
     if area < 10:
@@ -311,25 +360,16 @@ def compute_solidity(bgr_img, cx, cy, r):
 
 
 def compute_green_fill(bgr_img, cx, cy, r):
-    """
-    Green fill ratio = (green pixels inside circle) / (total pixels inside circle).
-    Cabbage model is fully green → high ratio.
-    Object with only a green edge → low ratio.
-    Returns float 0.0–1.0 (returns 0.0 on failure).
-    """
     img_h, img_w = bgr_img.shape[:2]
     ir = int(round(r))
     icx, icy = int(round(cx)), int(round(cy))
 
-    # Create circular mask
     mask_circle = np.zeros((img_h, img_w), dtype=np.uint8)
-    cv2.circle(mask_circle, (icx, icy), ir, 255, -1)  # filled circle
+    cv2.circle(mask_circle, (icx, icy), ir, 255, -1)
 
-    # Green mask of whole image
     hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
     green_mask = cv2.inRange(hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
 
-    # Count pixels inside circle
     total_inside = int(np.count_nonzero(mask_circle))
     if total_inside == 0:
         return 0.0
@@ -339,11 +379,6 @@ def compute_green_fill(bgr_img, cx, cy, r):
 
 
 def is_cabbage(bgr_img, cx, cy, r, debug_print=False):
-    """
-    Returns (passed: bool, solidity: float, fill_ratio: float).
-    Both solidity and fill_ratio must meet thresholds to pass.
-    If CABBAGE_FILTER_ENABLED is False, always returns True.
-    """
     if not CABBAGE_FILTER_ENABLED:
         return True, 1.0, 1.0
 
@@ -463,23 +498,29 @@ def draw_capture_annotation(frame, cx, cy, cr, center_x,
     return out
 
 
+# ══════════════════════════════════════════════════════════════
+#  CAPTURE STATE
+# ══════════════════════════════════════════════════════════════
 class CaptureState:
     """
-    Tracks the averaging window state for a single capture cycle.
-
     State machine:
-        IDLE  ──(object enters centerline AND passes cabbage filter)──►  MEASURING
-        MEASURING  ──(MEASURE_DELAY elapsed)──►  fires capture → publish feedback → locked forever
-        MEASURING  ──(object leaves centerline)──►  IDLE (reset, no capture)
+        IDLE      ──(object enters centerline AND passes cabbage filter)──► MEASURING
+        MEASURING ──(MEASURE_DELAY elapsed)──► fires capture → locked
+        MEASURING ──(object leaves centerline)──► IDLE (reset, no capture)
 
-    After one successful capture, no further captures will occur (capture_done=True).
-    publish_callback: optional callable() that will be called once after capture to publish ROS2 feedback.
+    publish_callback : callable() → publishes SUCCESS to /capture_feedback
+    log_publisher    : rclpy Publisher(String) → publishes LOG:[...] to /msg
+                       If None, log is printed to terminal.
+    log_file         : CSV path for persistent measurement log
     """
-    def __init__(self, publish_callback=None):
+    def __init__(self, publish_callback=None, log_publisher=None,
+                 log_file=DEFAULT_LOG_FILE):
         self.last_capture_t   = 0.0
         self.must_exit_first  = False
         self.capture_done     = False
         self.publish_callback = publish_callback
+        self.log_publisher    = log_publisher
+        self.log_file         = log_file
         self.reset()
 
     def reset(self):
@@ -489,19 +530,11 @@ class CaptureState:
         self.cx_samples      = []
         self.cy_samples      = []
 
-# Global capture state instance
+
 _capture_state = CaptureState()
 
 
-def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState = None):
-    """
-    Averaging-delay capture logic with cabbage validation [v4.1]:
-      1. When a valid circle enters the centerline, run cabbage filter first.
-      2. If cabbage filter fails → skip (not a cabbage, do not start measuring).
-      3. If cabbage filter passes → start collecting radius/position samples.
-      4. After MEASURE_DELAY, compute average and capture.
-      5. If the object leaves the centerline before delay is up, reset and discard.
-    """
+def check_and_capture(frame, circles, center_x, cap_counter, state=None):
     global _capture_state
     if state is None:
         state = _capture_state
@@ -511,7 +544,6 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
     if state.capture_done:
         return False
 
-    # Find nearest valid circle to centerline
     nearest = None
     for c in circles:
         cx, cy, cr, _ = c
@@ -519,10 +551,9 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
             nearest = c
             break
 
-    # ── Object NOT in centerline ──────────────────────────────
     if nearest is None:
         if state.measuring:
-            print(f"  [ABORT] Object left centerline during measuring — discarding {len(state.radius_samples)} samples")
+            print(f"  [ABORT] Object left centerline — discarding {len(state.radius_samples)} samples")
             state.reset()
         if state.must_exit_first:
             print("  [READY] Object left centerline — ready for next capture")
@@ -537,16 +568,11 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
     if now - state.last_capture_t < CAPTURE_COOLDOWN:
         return False
 
-    # ── Cabbage validation filter [v4.1] ──────────────────────
-    # Only run filter when object first enters centerline (not measuring yet)
-    # to avoid repeated checks every frame during measuring window.
     if not state.measuring:
         passed, solidity, fill_ratio = is_cabbage(frame, cx, cy, cr, debug_print=True)
         if not passed:
-            # Not a cabbage — silently skip, do not start measuring
             return False
 
-        # Passed — start measuring window
         state.measuring      = True
         state.measure_start  = now
         state.radius_samples = []
@@ -555,18 +581,16 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
         print(f"  [CABBAGE OK] solidity={solidity:.3f}  fill={fill_ratio:.3f}")
         print(f"  [MEASURE] Collecting samples for {MEASURE_DELAY}s...")
 
-    # Collect sample this frame
     state.radius_samples.append(cr)
     state.cx_samples.append(cx)
     state.cy_samples.append(cy)
 
     elapsed = now - state.measure_start
-
     progress = min(elapsed / MEASURE_DELAY, 1.0)
     bar = int(progress * 20)
-    print(f"\r  [MEASURE] {'█'*bar}{'░'*(20-bar)} {elapsed:.2f}/{MEASURE_DELAY:.2f}s  samples={len(state.radius_samples)}", end="", flush=True)
+    print(f"\r  [MEASURE] {'█'*bar}{'░'*(20-bar)} {elapsed:.2f}/{MEASURE_DELAY:.2f}s  "
+          f"samples={len(state.radius_samples)}", end="", flush=True)
 
-    # ── Delay elapsed — compute average and capture ───────────
     if elapsed >= MEASURE_DELAY:
         print()
 
@@ -594,6 +618,10 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
         avg_cy = float(np.mean(cy_clean))
         std_r  = float(np.std(r_clean))
         d_cm   = px_to_cm(avg_r) * 2
+
+        # [v4.2] Log measurement — publish to /msg or print to terminal
+        log_measurement(d_cm, log_file=state.log_file,
+                        ros2_publisher=state.log_publisher)
 
         annotated = draw_capture_annotation(frame, avg_cx, avg_cy, avg_r, center_x,
                                              avg_diameter_cm=d_cm,
@@ -716,7 +744,7 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
     ensure_save_dir()
 
     print("=" * 60)
-    print(" Green Circle Detector v4.1 — Live Camera (Direct)")
+    print(" Green Circle Detector v4.2 — Live Camera (Direct)")
     print(f" Resolution     = {CAPTURE_WIDTH}x{CAPTURE_HEIGHT} px")
     print(f" PX_PER_CM      = {PX_PER_CM:.4f} px/cm")
     print(f" MIN_DIAMETER   = {MIN_RADIUS_CM*2} cm  ({MIN_CAPTURE_RADIUS*2:.2f} px)")
@@ -732,6 +760,7 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
     fps_t         = time.time()
     fps_v         = 0.0
     cap_counter   = [0]
+    # Camera mode: no ros2_publisher → log_measurement prints to terminal
     cam_state     = CaptureState()
 
     frame_count   = 0
@@ -776,7 +805,6 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
                     (disp.shape[1]-80, 42),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,255,150), 1)
 
-        # Show cabbage filter status on display
         if CABBAGE_FILTER_ENABLED:
             cv2.putText(disp, "CAB-FILTER:ON",
                         (8, disp.shape[0]-20),
@@ -792,7 +820,7 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
             cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-        cv2.imshow("Green Circle Detector v4.1", disp)
+        cv2.imshow("Green Circle Detector v4.2", disp)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q'), 27):
@@ -843,19 +871,23 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.fps_t         = time.time()
             self.center_x      = CAPTURE_WIDTH // 2
 
+            # Publishers
             self.feedback_pub = self.create_publisher(String, '/capture_feedback', 10)
-            self.cam_state = CaptureState(publish_callback=self._publish_success)
+            # [v4.2] Measurement log publisher on /msg
+            self.log_pub = self.create_publisher(String, '/msg', 10)
+
+            self.cam_state = CaptureState(
+                publish_callback=self._publish_success,
+                log_publisher=self.log_pub,
+            )
 
             self.disp_frame = None
             self.frame_lock = threading.Lock()
 
             # ── Detection gate state [v4.2] ──────────────────────────
-            # WAITING   : locked, not detecting anything
-            # WARMUP    : received DONE:planting2, counting down
-            # DETECTING : fully active
             self.gate_state        = "WAITING"   # "WAITING" | "WARMUP" | "DETECTING"
-            self.planting2_recv_t  = 0.0          # time when DONE:planting2 was received
-            self.last_msg_received = "—"          # last /msg value for display
+            self.planting2_recv_t  = 0.0
+            self.last_msg_received = "—"
 
             self.sub = self.create_subscription(
                 CompressedImage,
@@ -867,7 +899,6 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.cmd_sub = self.create_subscription(
                 String, '/msg', self.cmd_callback, 10)
 
-            # Subscribe to /plant_feedback for detection gate unlock [v4.2]
             self.plant_feedback_sub = self.create_subscription(
                 String, '/plant_feedback', self.plant_feedback_callback, 10)
 
@@ -879,18 +910,19 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.get_logger().info(f" Warmup delay   = {PLANTING_WARMUP_SEC}s after startc")
             self.get_logger().info(" Topic : /camera_side/image_raw/compressed")
             self.get_logger().info(" Output: /capture_feedback  (String: SUCCESS)")
+            self.get_logger().info(" Log   : /msg  (String: LOG:[d1 d2 ...]  published each capture)")
             self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
             self.get_logger().info(" Unlock: /plant_feedback  (String: startc)")
             self.get_logger().info("=" * 50)
 
         def _publish_success(self):
+            from std_msgs.msg import String
             msg = String()
             msg.data = "SUCCESS"
             self.feedback_pub.publish(msg)
             self.get_logger().info("[FEEDBACK] Published: SUCCESS -> /capture_feedback")
 
-        def plant_feedback_callback(self, msg: String):
-            """Receives startc from /plant_feedback — unlocks detection gate."""
+        def plant_feedback_callback(self, msg):
             cmd = msg.data.strip()
             self.last_msg_received = f"/plant_feedback: {cmd}"
             if cmd == "startc":
@@ -898,22 +930,24 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                     self.gate_state       = "WARMUP"
                     self.planting2_recv_t = time.time()
                     self.get_logger().info(
-                        f"[GATE] Received startc on /plant_feedback — warmup {PLANTING_WARMUP_SEC}s starts now")
+                        f"[GATE] Received startc — warmup {PLANTING_WARMUP_SEC}s starts now")
                 else:
                     self.get_logger().info(
-                        f"[GATE] Received startc on /plant_feedback (already {self.gate_state}, ignored)")
+                        f"[GATE] Received startc (already {self.gate_state}, ignored)")
 
-        def cmd_callback(self, msg: String):
+        def cmd_callback(self, msg):
             cmd = msg.data.strip()
+            # Ignore log messages published by this node itself
+            if cmd.startswith("LOG:"):
+                return
             self.last_msg_received = f"/msg: {cmd}"
-
             if cmd == "DONE:cabbage":
                 self.cam_state.capture_done    = False
                 self.cam_state.must_exit_first = False
                 self.cam_state.reset()
                 self.get_logger().info("[RESET] Received DONE:cabbage — capture state reset")
 
-        def image_callback(self, msg: CompressedImage):
+        def image_callback(self, msg):
             np_arr = np.frombuffer(msg.data, np.uint8)
             frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is None:
@@ -931,14 +965,12 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             # ── Detection gate check [v4.2] ───────────────────────────
             if self.gate_state == "WARMUP":
-                elapsed_warmup = now - self.planting2_recv_t
-                if elapsed_warmup >= PLANTING_WARMUP_SEC:
+                if now - self.planting2_recv_t >= PLANTING_WARMUP_SEC:
                     self.gate_state = "DETECTING"
                     self.get_logger().info("[GATE] Warmup complete — detection ACTIVE")
 
             gate_active = (self.gate_state == "DETECTING")
 
-            # Only run detection when gate is open
             if gate_active and self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
                 self.last_circles, _, self.last_combined, _ = detect_green_circles(
                     frame,
@@ -950,19 +982,23 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 check_and_capture(frame, self.last_circles, self.center_x,
                                   self.cap_counter, state=self.cam_state)
             elif not gate_active:
-                # Gate locked — clear any stale detections
                 self.last_circles = []
 
             disp = draw_overlay(frame.copy(), self.last_circles, self.frame_count)
             draw_centerline_overlay(disp, self.last_circles, self.center_x)
 
             is_processed = gate_active and (self.frame_count % PROCESS_EVERY_N_FRAMES == 0)
-            proc_label   = "DETECT" if is_processed else ("GATE-LOCKED" if not gate_active else f"skip ({self.frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})")
-            proc_color   = (0, 255, 150) if is_processed else ((0, 80, 255) if not gate_active else (150, 150, 150))
+            if not gate_active:
+                proc_label, proc_color = "GATE-LOCKED", (0, 80, 255)
+            elif is_processed:
+                proc_label, proc_color = "DETECT", (0, 255, 150)
+            else:
+                proc_label = f"skip ({self.frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})"
+                proc_color = (150, 150, 150)
+
             cv2.putText(disp, proc_label,
                         (disp.shape[1]-130, 62),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, proc_color, 1)
-
             cv2.putText(disp, f"FPS:{self.fps_v:.1f}",
                         (disp.shape[1]-80, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
@@ -985,40 +1021,31 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-            # ── Status bar at bottom [v4.2] ───────────────────────────
-
-            # Gate status
+            # ── Status bar [v4.2] ─────────────────────────────────────
             if self.gate_state == "WAITING":
                 gate_label = "GATE: WAITING for /plant_feedback startc"
                 gate_color = (0, 80, 255)
             elif self.gate_state == "WARMUP":
-                remaining = max(0.0, PLANTING_WARMUP_SEC - (now - self.planting2_recv_t))
+                remaining  = max(0.0, PLANTING_WARMUP_SEC - (now - self.planting2_recv_t))
                 gate_label = f"GATE: WARMUP {remaining:.1f}s"
                 gate_color = (0, 200, 255)
             else:
                 gate_label = "GATE: DETECTING"
                 gate_color = (0, 220, 100)
 
-            # Last /msg received
-            msg_label  = f"last /msg: {self.last_msg_received}"
-            # Capture feedback status
-            fb_label   = f"/capture_feedback: {'SUCCESS' if self.cam_state.capture_done else '—'}"
+            fb_label  = f"/capture_feedback: {'SUCCESS' if self.cam_state.capture_done else '—'}"
+            msg_label = f"last msg: {self.last_msg_received}"
 
-            # Draw black background bar — 2 lines
             cv2.rectangle(disp,
                           (0, disp.shape[0] - 36),
                           (disp.shape[1], disp.shape[0]),
                           (20, 20, 20), -1)
-
-            # Line 1: gate status (left) | /capture_feedback (right)
             cv2.putText(disp, gate_label,
                         (6, disp.shape[0] - 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, gate_color, 1)
             cv2.putText(disp, fb_label,
                         (disp.shape[1] - 210, disp.shape[0] - 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (100, 200, 255), 1)
-
-            # Line 2: last /msg received
             cv2.putText(disp, msg_label,
                         (6, disp.shape[0] - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1)
@@ -1032,17 +1059,15 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
 
-    WIN_NAME = "Green Circle Detector v4.1 — ROS2"
+    WIN_NAME = "Green Circle Detector v4.2 — ROS2"
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
 
     try:
         while rclpy.ok():
             with node.frame_lock:
                 frame = node.disp_frame
-
             if frame is not None:
                 cv2.imshow(WIN_NAME, frame)
-
             key = cv2.waitKey(16) & 0xFF
             if key in (ord('q'), ord('Q'), 27):
                 break
@@ -1069,7 +1094,7 @@ def main():
     global CABBAGE_SOLIDITY_MIN, CABBAGE_FILL_MIN, CABBAGE_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v4.1 — Hollow green-edge circles + cabbage filter"
+        description="Green Circle Detector v4.2 — Hollow green-edge circles + cabbage filter"
     )
 
     def camera_input(value):
@@ -1097,14 +1122,9 @@ def main():
     parser.add_argument("--px-per-cm", type=float, default=PX_PER_CM)
     parser.add_argument("--measure-delay", type=float, default=MEASURE_DELAY)
     parser.add_argument("--center-tol",    type=int,   default=CENTER_TOL)
-
-    # Cabbage filter arguments [v4.1]
-    parser.add_argument("--no-cabbage-filter", action="store_true",
-                        help="Disable cabbage validation filter (capture any green circle)")
-    parser.add_argument("--solidity-min", type=float, default=CABBAGE_SOLIDITY_MIN,
-                        help=f"Minimum solidity for cabbage filter (default={CABBAGE_SOLIDITY_MIN})")
-    parser.add_argument("--fill-min",     type=float, default=CABBAGE_FILL_MIN,
-                        help=f"Minimum green fill ratio for cabbage filter (default={CABBAGE_FILL_MIN})")
+    parser.add_argument("--no-cabbage-filter", action="store_true")
+    parser.add_argument("--solidity-min", type=float, default=CABBAGE_SOLIDITY_MIN)
+    parser.add_argument("--fill-min",     type=float, default=CABBAGE_FILL_MIN)
 
     args = parser.parse_args()
 
@@ -1121,13 +1141,12 @@ def main():
     MIN_CAPTURE_RADIUS     = MIN_RADIUS_CM * PX_PER_CM
     MEASURE_DELAY          = args.measure_delay
     CENTER_TOL             = args.center_tol
-
-    # Apply cabbage filter settings
     CABBAGE_FILTER_ENABLED = not args.no_cabbage_filter
     CABBAGE_SOLIDITY_MIN   = args.solidity_min
     CABBAGE_FILL_MIN       = args.fill_min
 
-    if args.ros2:
+    # [v4.2] Default to ROS2 mode when launched with no mode argument
+    if args.ros2 or (args.camera is None and args.image is None):
         run_ros2(hog_thresh=args.threshold, edge_thickness=args.thickness,
                  min_radius=args.min_r, max_radius=args.max_r, show_mask=args.mask)
         return
@@ -1138,11 +1157,7 @@ def main():
                    max_radius=args.max_r, show_mask=args.mask)
         return
 
-    if args.image is None:
-        print("[ERROR] Specify one of: --ros2 | --camera <index> | --image <path>")
-        parser.print_help()
-        return
-
+    # Image mode
     bgr = cv2.imread(args.image)
     if bgr is None:
         print(f"[ERROR] File not found: {args.image}")

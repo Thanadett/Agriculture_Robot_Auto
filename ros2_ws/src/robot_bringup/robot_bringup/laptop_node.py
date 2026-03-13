@@ -258,9 +258,9 @@ class AprilTagServo(Node):
         d('dist_k1',  0.21581633); d('dist_k2', -1.09508649)
         d('dist_p1', -0.00213472); d('dist_p2',  0.00169510)
         d('dist_k3',  1.64003200)
-        d('target_x_offset', 0.05)
-        d('align_x_thresh', 0.03)
-        d('align_target_yaw_deg', 9.5)
+        d('target_x_offset', 0.037)
+        d('align_x_thresh', 0.037)
+        d('align_target_yaw_deg', 9.1)
 
     def _load_params(self):
         g = self.get_parameter
@@ -402,10 +402,10 @@ class AprilTagServo(Node):
 
             tx_lock = float(best.pose_t[0]) * (-1.0 if self.invert_x else 1.0)
             if tx_lock > self._align_x_thresh:
-                self._align_yaw_sign = -1.0
+                self._align_yaw_sign = 1.0
                 _side = "LEFT"
             else:
-                self._align_yaw_sign = 1.0
+                self._align_yaw_sign = -1.0
                 _side = "RIGHT/CENTER"
             self.get_logger().info(
                 f"[LOCK] ✓ tag_id={self.locked_tag_id}"

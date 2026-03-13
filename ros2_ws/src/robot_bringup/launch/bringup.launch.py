@@ -8,7 +8,7 @@ def generate_launch_description():
 
     # ── Declare common arguments ─────────────────────────────────
     args = [
-        DeclareLaunchArgument('yolo_model',      default_value='/home/chaiyapruk/392_auto/Agriculture_Robot_Auto/ros2_ws/best.pt',
+        DeclareLaunchArgument('yolo_model',      default_value='/home/t/392_project/ros2_ws/best.pt',
                               description='Path to YOLO .pt model'),
         DeclareLaunchArgument('target_tag_id',   default_value='-1',
                               description='AprilTag ID to track (-1 = YOLO auto)'),
@@ -17,7 +17,7 @@ def generate_launch_description():
         DeclareLaunchArgument('forward_vel',      default_value='0.20'),
         DeclareLaunchArgument('reverse_vel',      default_value='0.20'),
         DeclareLaunchArgument('camera_target_z',  default_value='0.50'),
-        DeclareLaunchArgument('reverse_after_m',  default_value='0.46'),
+        DeclareLaunchArgument('reverse_after_m',  default_value='0.48'),
         DeclareLaunchArgument('wait_sec',         default_value='2.0'),
         DeclareLaunchArgument('wheel_diameter',   default_value='0.127'),
         DeclareLaunchArgument('hdg_kp',           default_value='0.8',
@@ -29,17 +29,16 @@ def generate_launch_description():
     ]
 
     # ── Nodes ────────────────────────────────────────────────────
-
     laptop_node = Node(
-        package='robot_bringup',         
+        package='robot_bringup',
         executable='laptop_node',
         name='laptop_node',
         output='screen',
         parameters=[{
-            'yolo_model':      LaunchConfiguration('yolo_model'),
-            'target_tag_id':   LaunchConfiguration('target_tag_id'),
-            'tag_size':        LaunchConfiguration('tag_size'),
-            'cmd_topic':       '/cmd_vel_vision',   # → heading_pid
+            'yolo_model':    LaunchConfiguration('yolo_model'),
+            'target_tag_id': LaunchConfiguration('target_tag_id'),
+            'tag_size':      LaunchConfiguration('tag_size'),
+            'cmd_topic':     '/cmd_vel_vision',   # → heading_pid
         }],
     )
 
@@ -49,11 +48,11 @@ def generate_launch_description():
         name='heading_pid_node',
         output='screen',
         parameters=[{
-            'kp':              LaunchConfiguration('hdg_kp'),
-            'kd':              LaunchConfiguration('hdg_kd'),
-            'cmd_in_topic_vision':    '/cmd_vel_vision',  # ← from laptop_node
-            'cmd_in_topic_mission':   '/cmd_vel_mission', # ← from mission_controller
-            'cmd_out_topic':   '/cmd_vel_pid',
+            'kp':                     LaunchConfiguration('hdg_kp'),
+            'kd':                     LaunchConfiguration('hdg_kd'),
+            'cmd_in_topic_vision':    '/cmd_vel_vision',   # ← from laptop_node
+            'cmd_in_topic_mission':   '/cmd_vel_mission',  # ← from mission_controller
+            'cmd_out_topic':          '/cmd_vel_pid',
         }],
     )
 
@@ -69,7 +68,7 @@ def generate_launch_description():
             'reverse_after_m': LaunchConfiguration('reverse_after_m'),
             'wait_sec':        LaunchConfiguration('wait_sec'),
             'wheel_diameter':  LaunchConfiguration('wheel_diameter'),
-            'cmd_topic':       '/cmd_vel_mission', 
+            'cmd_topic':       '/cmd_vel_mission',
         }],
     )
 
@@ -79,9 +78,17 @@ def generate_launch_description():
         name='debug_x11',
         output='screen',
         parameters=[{
-            'window_name':     LaunchConfiguration('window_name'),
-            'skip_frames':     2,
+            'window_name': LaunchConfiguration('window_name'),
+            'skip_frames': 2,
         }],
+    )
+
+    laptop_cabbage_detect = Node(
+        package='robot_bringup',
+        executable='lc_laptop_cabbage_detect',
+        name='laptop_cabbage_detect',
+        output='screen',
+        arguments=['--ros2']
     )
 
     return LaunchDescription(args + [
@@ -89,4 +96,5 @@ def generate_launch_description():
         heading_pid_node,
         mission_controller,
         debug_x11,
+        laptop_cabbage_detect,
     ])

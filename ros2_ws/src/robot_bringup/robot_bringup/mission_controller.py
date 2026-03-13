@@ -332,6 +332,7 @@ class MissionController(Node):
                 self._log_stop("APPROACH")
                 self._go(MS_WAIT_APPROACH)
                 self._start_wait()
+                self._pub_msg("UP")
             else:
                 self._forward()
 
@@ -362,7 +363,7 @@ class MissionController(Node):
                 self._go(MS_WAIT_1)
                 self._start_wait()
                 # ---------- condition ----------
-                if self._pose_z is not None and self._pose_z > 0.18:
+                if self._pose_z is not None and self._pose_z > 18:
                     self._pub_msg("DONE:planting1A")
                 else:
                     self._pub_msg("DONE:planting1B")

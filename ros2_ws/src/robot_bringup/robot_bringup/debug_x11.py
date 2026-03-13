@@ -3,7 +3,7 @@
 Debug X11 Node — Unified Visualization
 ============================================================
 แสดงข้อมูลจากทุก node ในหน้าต่างเดียว:
-  • ซ้าย  : ภาพกล้องพร้อม overlay
+  • ซ้าย  : ภาพกล้องพร้อม overlay (สลับ side cam เมื่อ state=4/DONE)
   • กลาง  : World-frame map (robot vs plant) + trail path
   • ขวา   : Mission state timeline + params
   • ล่าง  : Real-time charts (z, bearing, v, ω, heading_error, heading_u)
@@ -167,31 +167,21 @@ def draw_chart(canvas, x, y, w, h, ring, label, lo, hi, color,
 
 
 # ════════════════════════════════════════════════════════════════
-# World-frame top-down map  (ใหม่ — แทน draw_topview เดิม)
+# World-frame top-down map
 # ════════════════════════════════════════════════════════════════
 def draw_worldmap(canvas, ox, oy,
                   robot_wx, robot_wy, robot_yaw,
                   plant_wx, plant_wy,
                   world_trail, state):
-    """
-    World-frame top-down map:
-      • Plant (tag) วาดเป็น green circle
-      • Robot วาดเป็น blue circle + red yaw arrow
-      • Trail  วาดเส้น path ที่ผ่านมา
-      • Grid + axis labels คล้าย matplotlib
-    """
-    # ── Background ───────────────────────────────────────────────
     cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (15, 15, 20), -1)
     cv2.rectangle(canvas, (ox, oy), (ox+MAP_W, oy+MAP_H), (40, 40, 55),  1)
 
-    # ── Plot area margins ────────────────────────────────────────
     PAD_L = 28; PAD_B = 18; PAD_T = 24; PAD_R = 8
     PX = ox + PAD_L
     PY = oy + PAD_T
     PW = MAP_W - PAD_L - PAD_R
     PH = MAP_H - PAD_T - PAD_B
 
-    # ── World range (auto-fit + margin) ─────────────────────────
     all_wx = [plant_wx]
     all_wy = [plant_wy]
     if robot_wx is not None:
@@ -208,7 +198,6 @@ def draw_worldmap(canvas, ox, oy,
     wy_min = min(all_wy) - margin
     wy_max = max(all_wy) + margin
 
-    # Keep aspect ratio square
     wx_span = wx_max - wx_min
     wy_span = wy_max - wy_min
     if wx_span > wy_span:
@@ -222,12 +211,10 @@ def draw_worldmap(canvas, ox, oy,
     wy_span = wy_max - wy_min
 
     def w2p(wx, wy):
-        """World coords → canvas pixel."""
         px = PX + int((wx - wx_min) / wx_span * PW)
         py = PY + PH - int((wy - wy_min) / wy_span * PH)
         return (int(px), int(py))
 
-    # ── Dashed grid lines at 0.5 m intervals ────────────────────
     def _nice_ticks(lo, hi, step=0.5):
         start = math.floor(lo / step) * step
         t = start
@@ -243,7 +230,6 @@ def draw_worldmap(canvas, ox, oy,
         while y > p2[1]:
             cv2.line(canvas, (p1[0], y), (p1[0], max(y-DASH, p2[1])), col, 1)
             y -= DASH + GAP
-        # X tick label
         lp = w2p(gx, wy_min)
         cv2.putText(canvas, f"{gx:.1f}", (lp[0]-8, oy+MAP_H-4),
                     _FONT, 0.22, (80, 80, 105), 1)
@@ -255,12 +241,10 @@ def draw_worldmap(canvas, ox, oy,
         while x < p2[0]:
             cv2.line(canvas, (x, p1[1]), (min(x+DASH, p2[0]), p1[1]), col, 1)
             x += DASH + GAP
-        # Y tick label
         lp = w2p(wx_min, gy)
         cv2.putText(canvas, f"{gy:.1f}", (ox+1, lp[1]+4),
                     _FONT, 0.22, (80, 80, 105), 1)
 
-    # Solid zero axes
     if wy_min < 0 < wy_max:
         p1 = w2p(wx_min, 0); p2 = w2p(wx_max, 0)
         cv2.line(canvas, p1, p2, (80, 80, 100), 1)
@@ -268,70 +252,57 @@ def draw_worldmap(canvas, ox, oy,
         p1 = w2p(0, wy_min); p2 = w2p(0, wy_max)
         cv2.line(canvas, p1, p2, (80, 80, 100), 1)
 
-    # ── Trail (robot path) ───────────────────────────────────────
     trail_pts = [w2p(pt[0], pt[1]) for pt in world_trail]
     for i in range(1, len(trail_pts)):
         alpha = 0.4 + 0.6 * (i / max(len(trail_pts)-1, 1))
         col = (int(30*alpha), int(180*alpha), int(80*alpha))
         cv2.line(canvas, trail_pts[i-1], trail_pts[i], col, 1)
 
-    # ── Plant (target) green circle ──────────────────────────────
     pp = w2p(plant_wx, plant_wy)
     cv2.circle(canvas, pp, 13, (0, 170, 55), -1)
     cv2.circle(canvas, pp, 13, (80, 255, 120), 2)
     _txt(canvas, "PLANT", (pp[0]+16, pp[1]+4), 0.30, (80, 255, 120))
 
-    # ── Robot blue circle + red yaw arrow ───────────────────────
     scol = STATE_COLOR.get(state, (180, 180, 180))
     if robot_wx is not None and robot_wy is not None:
         rp = w2p(robot_wx, robot_wy)
         rp = (max(PX+6, min(PX+PW-6, rp[0])),
               max(PY+6,  min(PY+PH-6, rp[1])))
 
-        # Line robot → plant (dashed guide)
         pp_c = w2p(plant_wx, plant_wy)
         cv2.line(canvas, rp, pp_c, (50, 50, 70), 1)
 
-        # Distance label at midpoint
         dist = math.sqrt((robot_wx - plant_wx)**2 + (robot_wy - plant_wy)**2)
         mid  = ((rp[0]+pp_c[0])//2, (rp[1]+pp_c[1])//2)
         _txt(canvas, f"{dist:.2f}m", (mid[0]+4, mid[1]-4), 0.28, (120, 120, 160))
 
-        # Robot circle (blue)
         cv2.circle(canvas, rp, 8, (220, 110, 40), -1)
         cv2.circle(canvas, rp, 8, (255, 255, 255), 1)
 
-        # Yaw arrow (red, like matplotlib)
         yaw = robot_yaw if robot_yaw is not None else 0.0
         arrow_len = max(18, int(PW * 0.10))
         ax = rp[0] + int(math.sin(yaw) * arrow_len)
         ay = rp[1] - int(math.cos(yaw) * arrow_len)
-        # Clamp arrow tip
         ax = max(PX, min(PX+PW, ax)); ay = max(PY, min(PY+PH, ay))
         cv2.arrowedLine(canvas, rp, (ax, ay), (50, 80, 220), 2, tipLength=0.35)
 
-        # Coord label near robot
         lx = rp[0] + 10
         ly = rp[1] - 10
         if lx + 70 > PX + PW: lx = rp[0] - 72
         _txt(canvas, f"X={robot_wx:+.2f}", (lx, ly),      0.28, scol)
         _txt(canvas, f"Y={robot_wy:+.2f}", (lx, ly + 13), 0.28, scol)
 
-    # ── Header title ─────────────────────────────────────────────
     yaw_deg = math.degrees(robot_yaw) if robot_yaw is not None else 0.0
     rwx = robot_wx if robot_wx is not None else 0.0
     rwy = robot_wy if robot_wy is not None else 0.0
     title = f"Pos: X={rwx:+.2f}, Y={rwy:+.2f}, Yaw={yaw_deg:+.1f}"
     _txt(canvas, title, (ox+4, oy+16), 0.30, (170, 170, 210))
 
-    # ── HeadingPID lock indicator (top-right corner of map) ──────
-    # (ยังคงไว้ด้านบนขวาของ MAP panel เหมือนเดิม)
-    return w2p   # return helper so caller can use if needed
+    return w2p
 
 
 def draw_mission_panel(canvas, ox, oy, ms_state, ms_events,
                        plant_ok, capture_ok):
-    """Right panel: mission state progress bar + event log."""
     cv2.rectangle(canvas, (ox,oy), (ox+INFO_W, oy+INFO_H), (10,10,14), -1)
     cv2.rectangle(canvas, (ox,oy), (ox+INFO_W, oy+INFO_H), (40,40,55),  1)
 
@@ -401,6 +372,9 @@ class DebugX11(Node):
     def _build_ros(self):
         self.create_subscription(CompressedImage,
             '/camera/image_raw/compressed', self._cb_img, 10)
+        # Side camera — ใช้แสดงเมื่อ vision state = STATE_DONE (4)
+        self.create_subscription(CompressedImage,
+            '/camera_side/image_raw/compressed', self._cb_img_side, 10)
         self.create_subscription(Float32MultiArray,
             '/vision_debug', self._cb_vision, 5)
         self.create_subscription(Twist,
@@ -414,8 +388,9 @@ class DebugX11(Node):
 
     # ── State ────────────────────────────────────────────────────
     def _init_data(self):
-        self._frame       = None
-        self._frame_cnt   = 0
+        self._frame        = None   # frame จาก /camera/image_raw/compressed
+        self._frame_side   = None   # frame จาก /camera_side/image_raw/compressed
+        self._frame_cnt    = 0
 
         self._v_state   = float(STATE_SEARCH)
         self._v_x       = None
@@ -442,14 +417,10 @@ class DebugX11(Node):
         self._plant_ok   = False
         self._capture_ok = False
 
-        # ── World-frame position ─────────────────────────────────
-        # Plant (tag) ตรึงที่ world (0, 0)
-        # Robot อยู่ที่ (-tag_x, -tag_z) เมื่อเห็น tag
-        self._robot_wx:  float | None = None   # world X
-        self._robot_wy:  float | None = None   # world Y
-        self._robot_yaw: float | None = None   # robot heading (from tag yaw)
+        self._robot_wx:  float | None = None
+        self._robot_wy:  float | None = None
+        self._robot_yaw: float | None = None
 
-        # Trail เก็บ (world_x, world_y) เป็น float
         self._world_trail: list[tuple[float, float]] = []
 
     def _init_rings(self):
@@ -467,12 +438,23 @@ class DebugX11(Node):
 
     # ── Callbacks ────────────────────────────────────────────────
     def _cb_img(self, msg: CompressedImage):
+        """รับภาพจากกล้องหลัก /camera/image_raw/compressed"""
         try:
             np_arr = np.frombuffer(msg.data, dtype=np.uint8)
             frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is not None:
                 self._frame = frame
                 self._frame_cnt += 1
+        except Exception:
+            pass
+
+    def _cb_img_side(self, msg: CompressedImage):
+        """รับภาพจากกล้องข้าง /camera_side/image_raw/compressed"""
+        try:
+            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
+            frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                self._frame_side = frame
         except Exception:
             pass
 
@@ -489,7 +471,6 @@ class DebugX11(Node):
             self._v_stuck   = int(d[7])
             self._v_bearing = d[8] if d[8] != -999.0 else None
 
-            # Push to rings
             self.rb_z.push(self._v_z if self._v_z is not None else 2.0)
             self.rb_x.push(self._v_x if self._v_x is not None else 0.0)
             self.rb_v.push(self._v_v)
@@ -499,9 +480,6 @@ class DebugX11(Node):
             if self._v_yaw is not None:
                 self.rb_yaw.push(self._v_yaw)
 
-            # ── World-frame position update ──────────────────────
-            # Plant อยู่ที่ (0,0) ในกรอบโลก
-            # Robot = (-tag_x, -tag_z)  [tag_x=ซ้าย/ขวา, tag_z=ระยะหน้า]
             if self._v_x is not None and self._v_z is not None:
                 wx = -float(self._v_x)
                 wy = -float(self._v_z)
@@ -509,7 +487,6 @@ class DebugX11(Node):
                 self._robot_wy  = wy
                 self._robot_yaw = float(self._v_bearing) if self._v_bearing is not None else 0.0
 
-                # Append ถ้าขยับพอ (threshold 0.01 m) เพื่อไม่ให้ trail หนาแน่นเกิน
                 MIN_DIST = 0.01
                 if (not self._world_trail or
                         math.hypot(wx - self._world_trail[-1][0],
@@ -564,16 +541,28 @@ class DebugX11(Node):
         scol      = STATE_COLOR.get(v_state, (180,180,180))
 
         # ── Camera panel ─────────────────────────────────────────
-        if self._frame is not None:
-            cam = cv2.resize(self._frame, (CAM_W, CAM_H))
+        # เลือกกล้องตาม vision state:
+        #   state == STATE_DONE (4) → ใช้ side camera
+        #   อื่นๆ                   → ใช้กล้องหลัก
+        use_side = (v_state == STATE_DONE)
+        active_frame = self._frame_side if use_side else self._frame
+
+        if active_frame is not None:
+            cam = cv2.resize(active_frame, (CAM_W, CAM_H))
         else:
             cam = np.zeros((CAM_H, CAM_W, 3), dtype=np.uint8)
-            _txt(cam, "NO CAMERA", (CAM_W//2-60, CAM_H//2), 0.7, (60,60,80), 2)
+            label = "NO SIDE CAM" if use_side else "NO CAMERA"
+            _txt(cam, label, (CAM_W//2-70, CAM_H//2), 0.7, (60,60,80), 2)
 
         cv2.rectangle(cam, (0,0), (CAM_W, 32), (0,0,0), -1)
         _txt(cam, STATE_NAME.get(v_state,"?"), (6,23), 0.65, scol, 2)
         _txt(cam, f"stable:{self._v_stable:3d}  stuck:{self._v_stuck:2d}",
              (180, 23), 0.38, (120,120,120))
+
+        # แสดง badge บอกว่ากำลังใช้กล้องไหน
+        cam_label = "CAM: SIDE" if use_side else "CAM: MAIN"
+        cam_lc    = (0, 220, 255) if use_side else (180, 180, 180)
+        _txt(cam, cam_label, (CAM_W - 130, 23), 0.38, cam_lc)
 
         if tag_z is not None:
             cv2.rectangle(cam, (0, CAM_H-36), (CAM_W, CAM_H), (0,0,0,128), -1)
@@ -598,7 +587,6 @@ class DebugX11(Node):
             state       = v_state,
         )
 
-        # HeadingPID lock indicator (วางที่มุมบนขวาของ map panel)
         lock_active = abs(self._cmd_v) > 0.02 and abs(self._cmd_w) < 0.05
         lx = MAP_X + MAP_W - 80; ly = 10
         lc = (0,230,100) if lock_active else (60,60,80)
@@ -607,7 +595,6 @@ class DebugX11(Node):
         _txt(canvas, "HDG LOCK" if lock_active else "HDG FREE",
              (lx+4, ly+16), 0.35, lc)
 
-        # HeadingPID mini display (ล่างของ map panel)
         hx = MAP_X + 4; hy = MAP_H - 70
         cv2.rectangle(canvas, (hx,hy), (hx+MAP_W-8, hy+64), (0,0,0), -1)
         _txt(canvas, "HeadingPID", (hx+4, hy+13), 0.32, (120,120,160))
