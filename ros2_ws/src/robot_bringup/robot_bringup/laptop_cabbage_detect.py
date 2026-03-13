@@ -12,6 +12,12 @@ Green Circle Detector v4 — Hollow circle (green edge only)
             Receives compressed image from /camera_side/image_raw/compressed topic
             instead of opening camera directly — suitable for running detector on laptop
             while Pi5 handles camera publishing.
+
+[v4.1 Change] Added cabbage validation filters before capture:
+              1. Solidity Check   — contour must be round/compact (>= CABBAGE_SOLIDITY_MIN)
+              2. Fill Color Check — inside of circle must be mostly green (>= CABBAGE_FILL_MIN)
+              Both filters must pass before entering MEASURE stage.
+              Use --no-cabbage-filter to disable for debugging.
 """
 
 import cv2
@@ -36,8 +42,6 @@ CAPTURE_COOLDOWN   = 3.0    # seconds — global cooldown after each capture
 
 # ── Averaging window before capture ──
 MEASURE_DELAY      = 0.5    # seconds — collect radius samples for this duration before capturing
-                             # once object enters centerline, wait MEASURE_DELAY seconds,
-                             # then average all collected radius values and capture
 
 # ── Distance and size parameters ──
 FOCAL_LENGTH_PX    = 600    # px  — measured at REFERENCE_WIDTH (640px)
@@ -52,8 +56,6 @@ REFERENCE_WIDTH    = 640    # px  — width used when measuring FOCAL_LENGTH_PX
 FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
 
 # ── PX_PER_CM calculated from real measurement ──
-# Real object diameter=15.91cm → radius=7.955cm, measured radius=172px
-# PX_PER_CM = 172 / 7.955 = 21.62
 PX_PER_CM = 29.27   # px/cm — hardcoded from real measurement
 
 # MIN_CAPTURE_RADIUS stored as float
@@ -61,6 +63,21 @@ MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # minimum radius in px (float)
 
 # ── Process every N frames ──
 PROCESS_EVERY_N_FRAMES = 4
+
+# ══════════════════════════════════════════════════════════════
+#  CABBAGE VALIDATION PARAMETERS  [v4.1]
+# ══════════════════════════════════════════════════════════════
+# Solidity = contour area / convex hull area
+# A perfect circle = 1.0  |  irregular/partial shape < 0.85
+CABBAGE_SOLIDITY_MIN  = 0.85   # minimum solidity to pass
+
+# Fill ratio = fraction of pixels INSIDE the detected circle that are green (HSV)
+# Cabbage model is fully green inside → high ratio
+# Other objects with only a green edge → low ratio
+CABBAGE_FILL_MIN      = 0.40   # minimum green fill ratio to pass (0.0–1.0)
+
+# Enable/disable cabbage filter globally (overridden by --no-cabbage-filter)
+CABBAGE_FILTER_ENABLED = True
 
 
 # ══════════════════════════════════════════════════════════════
@@ -154,7 +171,6 @@ def ransac_circle(xs, ys, n_iter=300, tol=2.5, min_inliers=8):
             cx_r, cy_r = -D/2, -E/2
             r_r = np.sqrt(max(cx_r**2 + cy_r**2 - F, 0))
             if r_r > 5:
-                # Return as float, no int rounding
                 return float(cx_r), float(cy_r), float(r_r), int(mask.sum())
         except Exception:
             pass
@@ -225,7 +241,6 @@ def detect_green_circles(bgr_img,
         if result is None:
             continue
 
-        # Keep as float throughout
         ccx, ccy, cr, n_in = result
 
         if not (min_radius <= cr <= max_radius):
@@ -235,6 +250,106 @@ def detect_green_circles(bgr_img,
 
     results = nms_circles(candidates)
     return results, green_mask, combined, debug_info
+
+
+# ══════════════════════════════════════════════════════════════
+#  F2. CABBAGE VALIDATION FILTERS  [v4.1]
+# ══════════════════════════════════════════════════════════════
+def compute_solidity(bgr_img, cx, cy, r):
+    """
+    Solidity = contour area / convex hull area.
+    Extracts the green mask ROI around the detected circle and computes
+    solidity of the largest contour found. High solidity = compact/round shape.
+    Returns float 0.0–1.0 (returns 0.0 on failure).
+    """
+    img_h, img_w = bgr_img.shape[:2]
+    ir = int(round(r))
+    icx, icy = int(round(cx)), int(round(cy))
+
+    # Crop ROI around circle with small padding
+    pad = 4
+    x1 = max(0, icx - ir - pad)
+    y1 = max(0, icy - ir - pad)
+    x2 = min(img_w, icx + ir + pad)
+    y2 = min(img_h, icy + ir + pad)
+    roi = bgr_img[y1:y2, x1:x2]
+    if roi.size == 0:
+        return 0.0
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    green_roi = cv2.inRange(hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
+
+    # Morphological cleanup
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    green_roi = cv2.morphologyEx(green_roi, cv2.MORPH_CLOSE, k)
+
+    contours, _ = cv2.findContours(green_roi, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
+
+    # Use the largest contour
+    cnt = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)
+    if area < 10:
+        return 0.0
+
+    hull = cv2.convexHull(cnt)
+    hull_area = cv2.contourArea(hull)
+    if hull_area < 1:
+        return 0.0
+
+    return float(area / hull_area)
+
+
+def compute_green_fill(bgr_img, cx, cy, r):
+    """
+    Green fill ratio = (green pixels inside circle) / (total pixels inside circle).
+    Cabbage model is fully green → high ratio.
+    Object with only a green edge → low ratio.
+    Returns float 0.0–1.0 (returns 0.0 on failure).
+    """
+    img_h, img_w = bgr_img.shape[:2]
+    ir = int(round(r))
+    icx, icy = int(round(cx)), int(round(cy))
+
+    # Create circular mask
+    mask_circle = np.zeros((img_h, img_w), dtype=np.uint8)
+    cv2.circle(mask_circle, (icx, icy), ir, 255, -1)  # filled circle
+
+    # Green mask of whole image
+    hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    green_mask = cv2.inRange(hsv, np.array([35, 35, 35]), np.array([85, 255, 255]))
+
+    # Count pixels inside circle
+    total_inside = int(np.count_nonzero(mask_circle))
+    if total_inside == 0:
+        return 0.0
+
+    green_inside = int(np.count_nonzero(cv2.bitwise_and(green_mask, mask_circle)))
+    return float(green_inside / total_inside)
+
+
+def is_cabbage(bgr_img, cx, cy, r, debug_print=False):
+    """
+    Returns (passed: bool, solidity: float, fill_ratio: float).
+    Both solidity and fill_ratio must meet thresholds to pass.
+    If CABBAGE_FILTER_ENABLED is False, always returns True.
+    """
+    if not CABBAGE_FILTER_ENABLED:
+        return True, 1.0, 1.0
+
+    solidity   = compute_solidity(bgr_img, cx, cy, r)
+    fill_ratio = compute_green_fill(bgr_img, cx, cy, r)
+
+    passed = (solidity >= CABBAGE_SOLIDITY_MIN) and (fill_ratio >= CABBAGE_FILL_MIN)
+
+    if debug_print:
+        status = "PASS" if passed else "FAIL"
+        print(f"  [CABBAGE] solidity={solidity:.3f}(min={CABBAGE_SOLIDITY_MIN})  "
+              f"fill={fill_ratio:.3f}(min={CABBAGE_FILL_MIN})  → {status}")
+
+    return passed, solidity, fill_ratio
 
 
 # ══════════════════════════════════════════════════════════════
@@ -278,7 +393,6 @@ def draw_centerline_overlay(frame, circles, center_x):
         passes = nr >= MIN_CAPTURE_RADIUS
         ring_color = (0, 220, 60) if passes else (0, 60, 220)
 
-        # Convert to int only when passing to OpenCV drawing functions
         icx, icy, ir = int(round(ncx)), int(round(ncy)), int(round(nr))
         cv2.circle(frame, (icx, icy), ir, ring_color, 3)
         cv2.circle(frame, (icx, icy), 4, ring_color, -1)
@@ -286,7 +400,7 @@ def draw_centerline_overlay(frame, circles, center_x):
         lx = max(0, icx - ir)
         ly = max(15, icy - ir - 32)
         status_icon = "OK" if passes else "FAIL"
-        d_cm = px_to_cm(nr) * 2  # diameter
+        d_cm = px_to_cm(nr) * 2
         cv2.putText(frame, f"d = {nr*2:.1f}px ({d_cm:.2f}cm) [{status_icon}]",
                     (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, ring_color, 2)
         cv2.putText(frame, f"min={MIN_RADIUS_CM*2}cm ({MIN_CAPTURE_RADIUS*2:.1f}px)",
@@ -300,13 +414,12 @@ def draw_capture_annotation(frame, cx, cy, cr, center_x,
     out = frame.copy()
     h, w = out.shape[:2]
 
-    # Convert to int only when passing to OpenCV drawing functions
     icx, icy, icr = int(round(cx)), int(round(cy)), int(round(cr))
 
     cv2.line(out, (center_x, 0), (center_x, h), (0, 80, 255), 2)
     cv2.circle(out, (icx, icy), icr+2, (255, 255, 255), 4)
     cv2.circle(out, (icx, icy), icr,   (255, 160, 0),   2)
-    cv2.line(out, (icx-icr, icy), (icx+icr, icy), (0, 255, 255), 1)  # diameter line
+    cv2.line(out, (icx-icr, icy), (icx+icr, icy), (0, 255, 255), 1)
     ch = 10
     cv2.line(out, (icx-ch, icy), (icx+ch, icy), (0,255,255), 2)
     cv2.line(out, (icx, icy-ch), (icx, icy+ch), (0,255,255), 2)
@@ -318,7 +431,6 @@ def draw_capture_annotation(frame, cx, cy, cr, center_x,
 
     label_y = max(20, by1-8)
 
-    # Use averaged diameter if provided, otherwise fall back to direct measurement
     if avg_diameter_cm is not None:
         d_cm = avg_diameter_cm
         label_main = f"AVG d = {d_cm:.2f} cm"
@@ -333,7 +445,6 @@ def draw_capture_annotation(frame, cx, cy, cr, center_x,
     cv2.putText(out, f"center ({cx:.1f}, {cy:.1f})",
                 (bx1, label_y+22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200,200,200), 1)
 
-    # Show sample count and std deviation if available
     if sample_count is not None and std_r is not None:
         std_cm = px_to_cm(std_r) * 2
         cv2.putText(out, f"samples={sample_count}  std={std_cm:.2f}cm",
@@ -349,7 +460,7 @@ class CaptureState:
     Tracks the averaging window state for a single capture cycle.
 
     State machine:
-        IDLE  ──(object enters centerline)──►  MEASURING
+        IDLE  ──(object enters centerline AND passes cabbage filter)──►  MEASURING
         MEASURING  ──(MEASURE_DELAY elapsed)──►  fires capture → publish feedback → locked forever
         MEASURING  ──(object leaves centerline)──►  IDLE (reset, no capture)
 
@@ -357,10 +468,10 @@ class CaptureState:
     publish_callback: optional callable() that will be called once after capture to publish ROS2 feedback.
     """
     def __init__(self, publish_callback=None):
-        self.last_capture_t   = 0.0    # preserved across reset() calls
-        self.must_exit_first  = False   # True after capture — object must leave centerline before next capture
-        self.capture_done     = False   # True after first successful capture — no more captures allowed
-        self.publish_callback = publish_callback  # called once after capture if provided
+        self.last_capture_t   = 0.0
+        self.must_exit_first  = False
+        self.capture_done     = False
+        self.publish_callback = publish_callback
         self.reset()
 
     def reset(self):
@@ -369,21 +480,19 @@ class CaptureState:
         self.radius_samples  = []
         self.cx_samples      = []
         self.cy_samples      = []
-        # NOTE: last_capture_t, must_exit_first, capture_done, publish_callback
-        # are intentionally NOT reset here so they persist across capture cycles
 
-# Global capture state instance (used by both run_camera and run_ros2)
+# Global capture state instance
 _capture_state = CaptureState()
 
 
 def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState = None):
     """
-    Averaging-delay capture logic:
-      1. When a valid circle enters the centerline, start measuring.
-      2. Collect radius/position samples every frame during MEASURE_DELAY seconds.
-      3. After MEASURE_DELAY, compute average radius and position, then capture.
-      4. If the object leaves the centerline before delay is up, reset and discard.
-      5. Global CAPTURE_COOLDOWN prevents re-triggering immediately after capture.
+    Averaging-delay capture logic with cabbage validation [v4.1]:
+      1. When a valid circle enters the centerline, run cabbage filter first.
+      2. If cabbage filter fails → skip (not a cabbage, do not start measuring).
+      3. If cabbage filter passes → start collecting radius/position samples.
+      4. After MEASURE_DELAY, compute average and capture.
+      5. If the object leaves the centerline before delay is up, reset and discard.
     """
     global _capture_state
     if state is None:
@@ -391,11 +500,10 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
 
     now = time.time()
 
-    # ── One-shot lock — no more captures after first success ──
     if state.capture_done:
         return False
 
-    # Find the nearest valid circle to the centerline
+    # Find nearest valid circle to centerline
     nearest = None
     for c in circles:
         cx, cy, cr, _ = c
@@ -406,10 +514,8 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
     # ── Object NOT in centerline ──────────────────────────────
     if nearest is None:
         if state.measuring:
-            # Object left before delay finished — discard samples
-            print(f"  [ABORT] Object left centerline during measuring window — discarding {len(state.radius_samples)} samples")
+            print(f"  [ABORT] Object left centerline during measuring — discarding {len(state.radius_samples)} samples")
             state.reset()
-        # Object has left the centerline — unlock for next capture
         if state.must_exit_first:
             print("  [READY] Object left centerline — ready for next capture")
             state.must_exit_first = False
@@ -417,24 +523,29 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
 
     cx, cy, cr, _ = nearest
 
-    # ── Must exit lock ────────────────────────────────────────
-    # Object stayed in centerline after last capture — block until it leaves
     if state.must_exit_first:
         return False
 
-    # ── Global cooldown check ─────────────────────────────────
     if now - state.last_capture_t < CAPTURE_COOLDOWN:
         return False
 
-    # ── Object IS in centerline ───────────────────────────────
+    # ── Cabbage validation filter [v4.1] ──────────────────────
+    # Only run filter when object first enters centerline (not measuring yet)
+    # to avoid repeated checks every frame during measuring window.
     if not state.measuring:
-        # First frame object enters centerline — start measuring window
-        state.measuring     = True
-        state.measure_start = now
+        passed, solidity, fill_ratio = is_cabbage(frame, cx, cy, cr, debug_print=True)
+        if not passed:
+            # Not a cabbage — silently skip, do not start measuring
+            return False
+
+        # Passed — start measuring window
+        state.measuring      = True
+        state.measure_start  = now
         state.radius_samples = []
         state.cx_samples     = []
         state.cy_samples     = []
-        print(f"  [MEASURE] Object entered centerline — collecting samples for {MEASURE_DELAY}s...")
+        print(f"  [CABBAGE OK] solidity={solidity:.3f}  fill={fill_ratio:.3f}")
+        print(f"  [MEASURE] Collecting samples for {MEASURE_DELAY}s...")
 
     # Collect sample this frame
     state.radius_samples.append(cr)
@@ -443,21 +554,19 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
 
     elapsed = now - state.measure_start
 
-    # Show measuring progress on console
     progress = min(elapsed / MEASURE_DELAY, 1.0)
     bar = int(progress * 20)
     print(f"\r  [MEASURE] {'█'*bar}{'░'*(20-bar)} {elapsed:.2f}/{MEASURE_DELAY:.2f}s  samples={len(state.radius_samples)}", end="", flush=True)
 
     # ── Delay elapsed — compute average and capture ───────────
     if elapsed >= MEASURE_DELAY:
-        print()  # newline after progress bar
+        print()
 
-        # Filter outliers — remove samples more than 2 std from median
         r_arr  = np.array(state.radius_samples)
         cx_arr = np.array(state.cx_samples)
         cy_arr = np.array(state.cy_samples)
 
-        median_r = float(np.median(r_arr))
+        median_r  = float(np.median(r_arr))
         std_r_all = float(np.std(r_arr))
         mask = np.abs(r_arr - median_r) <= 2 * std_r_all
 
@@ -468,7 +577,6 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
         n_total    = len(r_arr)
         n_filtered = int((~mask).sum())
 
-        # Fall back to all samples if filtering removes everything
         if len(r_clean) == 0:
             r_clean, cx_clean, cy_clean = r_arr, cx_arr, cy_arr
             n_filtered = 0
@@ -489,15 +597,14 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
         filename = os.path.join(SAVE_DIR, f"circle_{ts}_{cap_counter[0]:04d}.png")
         cv2.imwrite(filename, annotated)
 
-        # Set cooldown timestamp BEFORE reset so it is preserved
         last_t = now
         state.reset()
         state.last_capture_t  = last_t
-        state.must_exit_first = True   # block re-trigger until object leaves centerline
-        state.capture_done    = True   # one-shot: no more captures in this session
+        state.must_exit_first = True
+        state.capture_done    = True
 
         print(f"\n{'='*55}")
-        print(f"  [CAPTURE] Averaged measurement captured!")
+        print(f"  [CAPTURE] Cabbage measurement captured!")
         print(f"  File      : {filename}")
         print(f"  Avg center: ({avg_cx:.1f}, {avg_cy:.1f})")
         print(f"  Avg radius: {avg_r:.1f}px  std={std_r:.1f}px")
@@ -506,7 +613,6 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
         print(f"  Session locked — no further captures this run.")
         print(f"{'='*55}")
 
-        # Publish feedback topic once after capture
         if state.publish_callback is not None:
             state.publish_callback()
 
@@ -517,10 +623,9 @@ def check_and_capture(frame, circles, center_x, cap_counter, state: CaptureState
 
 def draw_overlay(frame, circles, frame_num):
     for cx, cy, r, _ in circles:
-        d_cm = px_to_cm(r) * 2  # diameter
+        d_cm = px_to_cm(r) * 2
         passes = r >= MIN_CAPTURE_RADIUS
 
-        # Convert to int only when passing to OpenCV drawing functions
         icx, icy, ir = int(round(cx)), int(round(cy)), int(round(r))
 
         if passes:
@@ -585,7 +690,7 @@ def visualize_static(bgr_img, circles, green_mask, combined,
 
 
 # ══════════════════════════════════════════════════════════════
-#  H. DIRECT CAMERA MODE (local camera fallback)
+#  H. DIRECT CAMERA MODE
 # ══════════════════════════════════════════════════════════════
 def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
                min_radius=15, max_radius=500, show_mask=False):
@@ -603,13 +708,13 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
     ensure_save_dir()
 
     print("=" * 60)
-    print(" Green Circle Detector v4 — Live Camera (Direct)")
+    print(" Green Circle Detector v4.1 — Live Camera (Direct)")
     print(f" Resolution     = {CAPTURE_WIDTH}x{CAPTURE_HEIGHT} px")
-    print(f" FOCAL_LENGTH   = {FOCAL_LENGTH_PX} px (ref@{REFERENCE_WIDTH}px -> scaled={FOCAL_LENGTH_SCALED:.1f}px)")
-    print(f" DISTANCE       = {CAMERA_DISTANCE_CM} cm")
     print(f" PX_PER_CM      = {PX_PER_CM:.4f} px/cm")
     print(f" MIN_DIAMETER   = {MIN_RADIUS_CM*2} cm  ({MIN_CAPTURE_RADIUS*2:.2f} px)")
     print(f" Process every  = {PROCESS_EVERY_N_FRAMES} frames")
+    print(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
+    print(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  |  fill >= {CABBAGE_FILL_MIN}")
     print(f" Save images to : ./{SAVE_DIR}/")
     print(" Q / ESC : quit    S : screenshot    M : toggle mask")
     print("=" * 60)
@@ -618,8 +723,8 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
     show_m        = show_mask
     fps_t         = time.time()
     fps_v         = 0.0
-    cap_counter:   list = [0]
-    cam_state = CaptureState()  # independent capture state for direct camera mode
+    cap_counter   = [0]
+    cam_state     = CaptureState()
 
     frame_count   = 0
     last_circles  = []
@@ -663,6 +768,12 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
                     (disp.shape[1]-80, 42),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,255,150), 1)
 
+        # Show cabbage filter status on display
+        if CABBAGE_FILTER_ENABLED:
+            cv2.putText(disp, "CAB-FILTER:ON",
+                        (8, disp.shape[0]-20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 100), 1)
+
         if show_m and last_combined is not None:
             mh, mw = last_combined.shape
             sm = cv2.resize(last_combined, (mw//4, mh//4))
@@ -673,7 +784,7 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
             cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-        cv2.imshow("Green Circle Detector v4", disp)
+        cv2.imshow("Green Circle Detector v4.1", disp)
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord('q'), ord('Q'), 27):
@@ -693,13 +804,6 @@ def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
 
 # ══════════════════════════════════════════════════════════════
 #  I. ROS2 SUBSCRIBER MODE
-#     Receives compressed image from Pi5 via topic
-#     /camera_side/image_raw/compressed
-#
-#     IMPORTANT: cv2.imshow must be called from the main thread.
-#     The ROS2 callback only decodes and processes the frame,
-#     then stores the result in self.disp_frame.
-#     The main thread reads self.disp_frame and handles display.
 # ══════════════════════════════════════════════════════════════
 def run_ros2(hog_thresh=0.50, edge_thickness=6,
              min_radius=15, max_radius=500, show_mask=False):
@@ -731,18 +835,12 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.fps_t         = time.time()
             self.center_x      = CAPTURE_WIDTH // 2
 
-            # Publisher — sends "SUCCESS" once after a successful capture
-            self.feedback_pub = self.create_publisher(
-                String, '/capture_feedback', 10)
-
-            # Independent capture state with publish callback wired in
+            self.feedback_pub = self.create_publisher(String, '/capture_feedback', 10)
             self.cam_state = CaptureState(publish_callback=self._publish_success)
 
-            # Shared frame buffer between callback thread and main display thread
             self.disp_frame = None
             self.frame_lock = threading.Lock()
 
-            # Subscribe to compressed image topic published by Pi5
             self.sub = self.create_subscription(
                 CompressedImage,
                 '/camera_side/image_raw/compressed',
@@ -750,62 +848,48 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 10
             )
 
-            # Subscribe to /msg for reset command (DONE:cabbage)
             self.cmd_sub = self.create_subscription(
-                String,
-                '/msg',
-                self.cmd_callback,
-                10
-            )
+                String, '/msg', self.cmd_callback, 10)
 
             self.get_logger().info("=" * 50)
-            self.get_logger().info(" Circle Detector Node — ROS2 Mode")
-            self.get_logger().info(" Waiting for images from Pi5...")
+            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.1")
+            self.get_logger().info(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
+            self.get_logger().info(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  fill >= {CABBAGE_FILL_MIN}")
             self.get_logger().info(" Topic : /camera_side/image_raw/compressed")
             self.get_logger().info(" Output: /capture_feedback  (String: SUCCESS)")
             self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
-            self.get_logger().info(f" PX_PER_CM     = {PX_PER_CM:.4f}")
-            self.get_logger().info(f" MIN_DIAMETER  = {MIN_RADIUS_CM*2} cm")
-            self.get_logger().info(f" Process every = {PROCESS_EVERY_N_FRAMES} frames")
-            self.get_logger().info(" Q / ESC : quit    M : toggle mask")
             self.get_logger().info("=" * 50)
 
         def _publish_success(self):
-            """Called once after capture — publishes SUCCESS to /capture_feedback."""
             msg = String()
             msg.data = "SUCCESS"
             self.feedback_pub.publish(msg)
             self.get_logger().info("[FEEDBACK] Published: SUCCESS -> /capture_feedback")
 
         def cmd_callback(self, msg: String):
-            """Listens to /msg topic — resets capture state when 'DONE:cabbage' is received."""
             cmd = msg.data.strip()
             if cmd == "DONE:cabbage":
                 self.cam_state.capture_done    = False
                 self.cam_state.must_exit_first = False
                 self.cam_state.reset()
-                self.get_logger().info("[RESET] Received DONE:cabbage — capture state reset, ready for next capture")
+                self.get_logger().info("[RESET] Received DONE:cabbage — capture state reset")
 
         def image_callback(self, msg: CompressedImage):
-            # Decode JPEG compressed image from topic
             np_arr = np.frombuffer(msg.data, np.uint8)
             frame  = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
             if frame is None:
                 self.get_logger().warn("Failed to decode image frame")
                 return
 
-            # Update center_x from actual received frame size
             h, w = frame.shape[:2]
             self.center_x = w // 2
 
-            # FPS calculation
             now = time.time()
             self.fps_v = 0.9*self.fps_v + 0.1*(1.0/max(now-self.fps_t, 1e-6))
             self.fps_t = now
 
             self.frame_count += 1
 
-            # Run detection every N frames to reduce CPU load
             if self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
                 self.last_circles, _, self.last_combined, _ = detect_green_circles(
                     frame,
@@ -817,11 +901,9 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 check_and_capture(frame, self.last_circles, self.center_x,
                                   self.cap_counter, state=self.cam_state)
 
-            # Build display frame with overlays
             disp = draw_overlay(frame.copy(), self.last_circles, self.frame_count)
             draw_centerline_overlay(disp, self.last_circles, self.center_x)
 
-            # Frame process status label
             is_processed = (self.frame_count % PROCESS_EVERY_N_FRAMES == 0)
             proc_label   = "DETECT" if is_processed else f"skip ({self.frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})"
             proc_color   = (0, 255, 150) if is_processed else (150, 150, 150)
@@ -829,7 +911,6 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                         (disp.shape[1]-120, 62),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, proc_color, 1)
 
-            # FPS and capture count labels
             cv2.putText(disp, f"FPS:{self.fps_v:.1f}",
                         (disp.shape[1]-80, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
@@ -837,7 +918,11 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                         (disp.shape[1]-80, 42),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,255,150), 1)
 
-            # Optional mask overlay in bottom-right corner
+            if CABBAGE_FILTER_ENABLED:
+                cv2.putText(disp, "CAB-FILTER:ON",
+                            (8, disp.shape[0]-20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 100), 1)
+
             if self.show_m and self.last_combined is not None:
                 mh, mw = self.last_combined.shape
                 sm = cv2.resize(self.last_combined, (mw//4, mh//4))
@@ -848,35 +933,30 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-            # Source label to distinguish from direct camera mode
             cv2.putText(disp, "SRC: ROS2 Pi5", (8, disp.shape[0]-8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1)
 
-            # Store frame for main thread to display (thread-safe)
             with self.frame_lock:
                 self.disp_frame = disp
 
-    # Initialize ROS2 node
     rclpy.init()
     node = CircleDetectorNode()
 
-    # Spin ROS2 in a background thread so main thread stays free for cv2.imshow
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
 
-    WIN_NAME = "Green Circle Detector v4 — ROS2"
+    WIN_NAME = "Green Circle Detector v4.1 — ROS2"
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
 
     try:
         while rclpy.ok():
-            # Read latest frame prepared by callback (main thread only)
             with node.frame_lock:
                 frame = node.disp_frame
 
             if frame is not None:
                 cv2.imshow(WIN_NAME, frame)
 
-            key = cv2.waitKey(16) & 0xFF  # ~60 Hz display poll
+            key = cv2.waitKey(16) & 0xFF
             if key in (ord('q'), ord('Q'), 27):
                 break
             elif key in (ord('m'), ord('M')):
@@ -899,62 +979,50 @@ def main():
     global FOCAL_LENGTH_PX, CAMERA_DISTANCE_CM, MIN_RADIUS_CM
     global PX_PER_CM, MIN_CAPTURE_RADIUS, PROCESS_EVERY_N_FRAMES
     global CAPTURE_WIDTH, CAPTURE_HEIGHT, FOCAL_LENGTH_SCALED, MEASURE_DELAY, CENTER_TOL
+    global CABBAGE_SOLIDITY_MIN, CABBAGE_FILL_MIN, CABBAGE_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v4 — Hollow green-edge circles"
+        description="Green Circle Detector v4.1 — Hollow green-edge circles + cabbage filter"
     )
 
     def camera_input(value):
-        """Accept both int index (0,1,2) and string device path (/dev/webcam_...)"""
         try:
             return int(value)
         except ValueError:
             return value
 
-    parser.add_argument("--camera",    type=camera_input, default=None,
-                        metavar="PATH_OR_INDEX",
-                        help="Camera device path or index (e.g. 0 or /dev/webcam_EYD_1080p)")
-    parser.add_argument("--ros2",      action="store_true",
-                        help="Subscribe to ROS2 topic from Pi5 instead of opening camera directly")
-    parser.add_argument("--image",     default=None,
-                        help="Path to static image file for single-frame detection")
-    parser.add_argument("--save",      default=None,
-                        help="Save visualization result to file (image mode only)")
-    parser.add_argument("--threshold", type=float, default=0.50,
-                        help="HOG arc score threshold (default=0.50)")
-    parser.add_argument("--thickness", type=int,   default=6,
-                        help="Green edge thickness in px (default=6)")
-    parser.add_argument("--min-r",     type=int,   default=15,
-                        help="Minimum circle radius in px (default=15)")
-    parser.add_argument("--max-r",     type=int,   default=500,
-                        help="Maximum circle radius in px (default=500)")
-    parser.add_argument("--mask",      action="store_true",
-                        help="Show edge mask overlay in corner")
-    parser.add_argument("--debug",     action="store_true",
-                        help="Show HOG filter debug visualization")
-    parser.add_argument("--focal",     type=float, default=FOCAL_LENGTH_PX,
-                        help=f"Focal length in px at reference width (default={FOCAL_LENGTH_PX})")
-    parser.add_argument("--distance",  type=float, default=CAMERA_DISTANCE_CM,
-                        help=f"Camera to object distance in cm (default={CAMERA_DISTANCE_CM})")
-    parser.add_argument("--min-cm",    type=float, default=MIN_RADIUS_CM,
-                        help=f"Minimum circle radius in cm (default={MIN_RADIUS_CM})")
-    parser.add_argument("--every",     type=int,   default=PROCESS_EVERY_N_FRAMES,
-                        help=f"Run detection every N frames (default={PROCESS_EVERY_N_FRAMES})")
-    parser.add_argument("--width",     type=int,   default=CAPTURE_WIDTH,
-                        help=f"Frame width in px (default={CAPTURE_WIDTH})")
-    parser.add_argument("--height",    type=int,   default=CAPTURE_HEIGHT,
-                        help=f"Frame height in px (default={CAPTURE_HEIGHT})")
-    parser.add_argument("--px-per-cm", type=float, default=PX_PER_CM,
-                        help=f"Calibrated px/cm value (default={PX_PER_CM})")
-    parser.add_argument("--measure-delay", type=float, default=MEASURE_DELAY,
-                        help=f"Seconds to collect samples before capturing averaged result (default={MEASURE_DELAY})")
-    parser.add_argument("--center-tol", type=int, default=CENTER_TOL,
-                        help=f"Centerline tolerance in px (default={CENTER_TOL})")
+    parser.add_argument("--camera",    type=camera_input, default=None)
+    parser.add_argument("--ros2",      action="store_true")
+    parser.add_argument("--image",     default=None)
+    parser.add_argument("--save",      default=None)
+    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--thickness", type=int,   default=6)
+    parser.add_argument("--min-r",     type=int,   default=15)
+    parser.add_argument("--max-r",     type=int,   default=500)
+    parser.add_argument("--mask",      action="store_true")
+    parser.add_argument("--debug",     action="store_true")
+    parser.add_argument("--focal",     type=float, default=FOCAL_LENGTH_PX)
+    parser.add_argument("--distance",  type=float, default=CAMERA_DISTANCE_CM)
+    parser.add_argument("--min-cm",    type=float, default=MIN_RADIUS_CM)
+    parser.add_argument("--every",     type=int,   default=PROCESS_EVERY_N_FRAMES)
+    parser.add_argument("--width",     type=int,   default=CAPTURE_WIDTH)
+    parser.add_argument("--height",    type=int,   default=CAPTURE_HEIGHT)
+    parser.add_argument("--px-per-cm", type=float, default=PX_PER_CM)
+    parser.add_argument("--measure-delay", type=float, default=MEASURE_DELAY)
+    parser.add_argument("--center-tol",    type=int,   default=CENTER_TOL)
+
+    # Cabbage filter arguments [v4.1]
+    parser.add_argument("--no-cabbage-filter", action="store_true",
+                        help="Disable cabbage validation filter (capture any green circle)")
+    parser.add_argument("--solidity-min", type=float, default=CABBAGE_SOLIDITY_MIN,
+                        help=f"Minimum solidity for cabbage filter (default={CABBAGE_SOLIDITY_MIN})")
+    parser.add_argument("--fill-min",     type=float, default=CABBAGE_FILL_MIN,
+                        help=f"Minimum green fill ratio for cabbage filter (default={CABBAGE_FILL_MIN})")
+
     args = parser.parse_args()
 
     random.seed(0)
 
-    # Apply global config overrides from arguments
     FOCAL_LENGTH_PX        = args.focal
     CAMERA_DISTANCE_CM     = args.distance
     MIN_RADIUS_CM          = args.min_cm
@@ -963,31 +1031,24 @@ def main():
     PROCESS_EVERY_N_FRAMES = args.every
     FOCAL_LENGTH_SCALED    = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
     PX_PER_CM              = args.px_per_cm
-    MIN_CAPTURE_RADIUS     = MIN_RADIUS_CM * PX_PER_CM  # float, no int()
+    MIN_CAPTURE_RADIUS     = MIN_RADIUS_CM * PX_PER_CM
     MEASURE_DELAY          = args.measure_delay
     CENTER_TOL             = args.center_tol
 
-    # ── Mode selection ──────────────────────────────────────────
-    # Priority: --ros2 > --camera > --image
+    # Apply cabbage filter settings
+    CABBAGE_FILTER_ENABLED = not args.no_cabbage_filter
+    CABBAGE_SOLIDITY_MIN   = args.solidity_min
+    CABBAGE_FILL_MIN       = args.fill_min
+
     if args.ros2:
-        run_ros2(
-            hog_thresh=args.threshold,
-            edge_thickness=args.thickness,
-            min_radius=args.min_r,
-            max_radius=args.max_r,
-            show_mask=args.mask,
-        )
+        run_ros2(hog_thresh=args.threshold, edge_thickness=args.thickness,
+                 min_radius=args.min_r, max_radius=args.max_r, show_mask=args.mask)
         return
 
     if args.camera is not None:
-        run_camera(
-            camera_index=args.camera,
-            hog_thresh=args.threshold,
-            edge_thickness=args.thickness,
-            min_radius=args.min_r,
-            max_radius=args.max_r,
-            show_mask=args.mask,
-        )
+        run_camera(camera_index=args.camera, hog_thresh=args.threshold,
+                   edge_thickness=args.thickness, min_radius=args.min_r,
+                   max_radius=args.max_r, show_mask=args.mask)
         return
 
     if args.image is None:
@@ -995,25 +1056,22 @@ def main():
         parser.print_help()
         return
 
-    # Static image mode
     bgr = cv2.imread(args.image)
     if bgr is None:
         print(f"[ERROR] File not found: {args.image}")
         return
 
     circles, gmask, combined, dbg = detect_green_circles(
-        bgr,
-        hog_thresh=args.threshold,
-        edge_thickness=args.thickness,
-        min_radius=args.min_r,
-        max_radius=args.max_r,
-        debug=args.debug,
-    )
+        bgr, hog_thresh=args.threshold, edge_thickness=args.thickness,
+        min_radius=args.min_r, max_radius=args.max_r, debug=args.debug)
 
     print(f"\nDetected {len(circles)} circle(s):")
     for i, (cx, cy, r, n_in) in enumerate(circles, 1):
         d_cm = px_to_cm(r) * 2
-        print(f"  [{i}] center=({cx:.1f},{cy:.1f})  diameter={r*2:.1f}px ({d_cm:.2f}cm)  inliers={n_in}")
+        passed, solidity, fill = is_cabbage(bgr, cx, cy, r, debug_print=True)
+        cab_str = "CABBAGE✓" if passed else "NOT-CABBAGE✗"
+        print(f"  [{i}] center=({cx:.1f},{cy:.1f})  diameter={r*2:.1f}px ({d_cm:.2f}cm)"
+              f"  inliers={n_in}  {cab_str}")
 
     visualize_static(bgr, circles, gmask, combined,
                      debug_info=dbg if args.debug else None,

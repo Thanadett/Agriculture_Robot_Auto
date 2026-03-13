@@ -8,7 +8,7 @@ def generate_launch_description():
 
     # ── Declare common arguments ─────────────────────────────────
     args = [
-        DeclareLaunchArgument('yolo_model',      default_value='/home/t/392_project/ros2_ws/best.pt',
+        DeclareLaunchArgument('yolo_model',      default_value='/home/chaiyapruk/392_auto/Agriculture_Robot_Auto/ros2_ws/best.pt',
                               description='Path to YOLO .pt model'),
         DeclareLaunchArgument('target_tag_id',   default_value='-1',
                               description='AprilTag ID to track (-1 = YOLO auto)'),
