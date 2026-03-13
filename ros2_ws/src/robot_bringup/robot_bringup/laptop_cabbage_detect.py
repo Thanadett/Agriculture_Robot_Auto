@@ -36,7 +36,7 @@ import os
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════
 SAVE_DIR           = "green_circle_pictures"
-CENTER_TOL         = 50     # px — centerline tolerance
+CENTER_TOL         = 150     # px — centerline tolerance
 NEAR_LINE_RANGE    = 120    # px
 CAPTURE_COOLDOWN   = 3.0    # seconds — global cooldown after each capture
 
@@ -63,6 +63,14 @@ MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # minimum radius in px (float)
 
 # ── Process every N frames ──
 PROCESS_EVERY_N_FRAMES = 4
+
+# ══════════════════════════════════════════════════════════════
+#  DETECTION GATE PARAMETERS  [v4.2]
+# ══════════════════════════════════════════════════════════════
+# Detection is LOCKED at startup.
+# Unlocked only after receiving DONE:planting2 on /msg topic.
+# After receiving, waits PLANTING_WARMUP_SEC before detection starts.
+PLANTING_WARMUP_SEC = 5.0   # seconds to wait after DONE:planting2 before detecting
 
 # ══════════════════════════════════════════════════════════════
 #  CABBAGE VALIDATION PARAMETERS  [v4.1]
@@ -841,6 +849,14 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.disp_frame = None
             self.frame_lock = threading.Lock()
 
+            # ── Detection gate state [v4.2] ──────────────────────────
+            # WAITING   : locked, not detecting anything
+            # WARMUP    : received DONE:planting2, counting down
+            # DETECTING : fully active
+            self.gate_state        = "WAITING"   # "WAITING" | "WARMUP" | "DETECTING"
+            self.planting2_recv_t  = 0.0          # time when DONE:planting2 was received
+            self.last_msg_received = "—"          # last /msg value for display
+
             self.sub = self.create_subscription(
                 CompressedImage,
                 '/camera_side/image_raw/compressed',
@@ -851,13 +867,20 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.cmd_sub = self.create_subscription(
                 String, '/msg', self.cmd_callback, 10)
 
+            # Subscribe to /plant_feedback for detection gate unlock [v4.2]
+            self.plant_feedback_sub = self.create_subscription(
+                String, '/plant_feedback', self.plant_feedback_callback, 10)
+
             self.get_logger().info("=" * 50)
-            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.1")
+            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.2")
             self.get_logger().info(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
             self.get_logger().info(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  fill >= {CABBAGE_FILL_MIN}")
+            self.get_logger().info(f" Detection gate = LOCKED (waiting for startc on /plant_feedback)")
+            self.get_logger().info(f" Warmup delay   = {PLANTING_WARMUP_SEC}s after startc")
             self.get_logger().info(" Topic : /camera_side/image_raw/compressed")
             self.get_logger().info(" Output: /capture_feedback  (String: SUCCESS)")
             self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
+            self.get_logger().info(" Unlock: /plant_feedback  (String: startc)")
             self.get_logger().info("=" * 50)
 
         def _publish_success(self):
@@ -866,8 +889,24 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.feedback_pub.publish(msg)
             self.get_logger().info("[FEEDBACK] Published: SUCCESS -> /capture_feedback")
 
+        def plant_feedback_callback(self, msg: String):
+            """Receives startc from /plant_feedback — unlocks detection gate."""
+            cmd = msg.data.strip()
+            self.last_msg_received = f"/plant_feedback: {cmd}"
+            if cmd == "startc":
+                if self.gate_state == "WAITING":
+                    self.gate_state       = "WARMUP"
+                    self.planting2_recv_t = time.time()
+                    self.get_logger().info(
+                        f"[GATE] Received startc on /plant_feedback — warmup {PLANTING_WARMUP_SEC}s starts now")
+                else:
+                    self.get_logger().info(
+                        f"[GATE] Received startc on /plant_feedback (already {self.gate_state}, ignored)")
+
         def cmd_callback(self, msg: String):
             cmd = msg.data.strip()
+            self.last_msg_received = f"/msg: {cmd}"
+
             if cmd == "DONE:cabbage":
                 self.cam_state.capture_done    = False
                 self.cam_state.must_exit_first = False
@@ -890,7 +929,17 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             self.frame_count += 1
 
-            if self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
+            # ── Detection gate check [v4.2] ───────────────────────────
+            if self.gate_state == "WARMUP":
+                elapsed_warmup = now - self.planting2_recv_t
+                if elapsed_warmup >= PLANTING_WARMUP_SEC:
+                    self.gate_state = "DETECTING"
+                    self.get_logger().info("[GATE] Warmup complete — detection ACTIVE")
+
+            gate_active = (self.gate_state == "DETECTING")
+
+            # Only run detection when gate is open
+            if gate_active and self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
                 self.last_circles, _, self.last_combined, _ = detect_green_circles(
                     frame,
                     hog_thresh=self.hog_thresh,
@@ -900,15 +949,18 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 )
                 check_and_capture(frame, self.last_circles, self.center_x,
                                   self.cap_counter, state=self.cam_state)
+            elif not gate_active:
+                # Gate locked — clear any stale detections
+                self.last_circles = []
 
             disp = draw_overlay(frame.copy(), self.last_circles, self.frame_count)
             draw_centerline_overlay(disp, self.last_circles, self.center_x)
 
-            is_processed = (self.frame_count % PROCESS_EVERY_N_FRAMES == 0)
-            proc_label   = "DETECT" if is_processed else f"skip ({self.frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})"
-            proc_color   = (0, 255, 150) if is_processed else (150, 150, 150)
+            is_processed = gate_active and (self.frame_count % PROCESS_EVERY_N_FRAMES == 0)
+            proc_label   = "DETECT" if is_processed else ("GATE-LOCKED" if not gate_active else f"skip ({self.frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})")
+            proc_color   = (0, 255, 150) if is_processed else ((0, 80, 255) if not gate_active else (150, 150, 150))
             cv2.putText(disp, proc_label,
-                        (disp.shape[1]-120, 62),
+                        (disp.shape[1]-130, 62),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, proc_color, 1)
 
             cv2.putText(disp, f"FPS:{self.fps_v:.1f}",
@@ -933,8 +985,43 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-            cv2.putText(disp, "SRC: ROS2 Pi5", (8, disp.shape[0]-8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 200, 255), 1)
+            # ── Status bar at bottom [v4.2] ───────────────────────────
+
+            # Gate status
+            if self.gate_state == "WAITING":
+                gate_label = "GATE: WAITING for /plant_feedback startc"
+                gate_color = (0, 80, 255)
+            elif self.gate_state == "WARMUP":
+                remaining = max(0.0, PLANTING_WARMUP_SEC - (now - self.planting2_recv_t))
+                gate_label = f"GATE: WARMUP {remaining:.1f}s"
+                gate_color = (0, 200, 255)
+            else:
+                gate_label = "GATE: DETECTING"
+                gate_color = (0, 220, 100)
+
+            # Last /msg received
+            msg_label  = f"last /msg: {self.last_msg_received}"
+            # Capture feedback status
+            fb_label   = f"/capture_feedback: {'SUCCESS' if self.cam_state.capture_done else '—'}"
+
+            # Draw black background bar — 2 lines
+            cv2.rectangle(disp,
+                          (0, disp.shape[0] - 36),
+                          (disp.shape[1], disp.shape[0]),
+                          (20, 20, 20), -1)
+
+            # Line 1: gate status (left) | /capture_feedback (right)
+            cv2.putText(disp, gate_label,
+                        (6, disp.shape[0] - 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, gate_color, 1)
+            cv2.putText(disp, fb_label,
+                        (disp.shape[1] - 210, disp.shape[0] - 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (100, 200, 255), 1)
+
+            # Line 2: last /msg received
+            cv2.putText(disp, msg_label,
+                        (6, disp.shape[0] - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1)
 
             with self.frame_lock:
                 self.disp_frame = disp
