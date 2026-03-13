@@ -12,14 +12,17 @@ static constexpr bool INVERT_RF = false;
 static constexpr bool INVERT_RR = false;
 
 //-------- Motor Driver Pins ----------------
-#define LF_IN1 32 // Left Front IN1
-#define LF_IN2 23 // Left Front IN2
-#define LR_IN1 27 // Left Rear IN1
-#define LR_IN2 26 // Left Rear IN2
-#define RF_IN1 14 // Right Front IN1
-#define RF_IN2 12 // Right Front IN2
-#define RR_IN1 33 // Right Rear IN1
-#define RR_IN2 25 // Right Rear IN2
+// inverted:
+#define LF_IN1 33 // LF == RR
+#define LF_IN2 25 
+#define LR_IN1 14 // LR == RF
+#define LR_IN2 12 
+#define RF_IN1 27 
+#define RF_IN2 26 
+#define RR_IN1 32 
+#define RR_IN2 23 
+
+
 
 // ---------------- LEDC PWM ----------------
 static constexpr int PWM_FREQ_HZ = 20000; // 20kHz เงียบ
@@ -55,21 +58,23 @@ static constexpr float IDLE_DECAY = 0.85f;
  *  แนะนำใช้: 13, 16-19, 34-39 (input-only สำหรับ 34-39)
  */
 
+ // LF == RR
+ // LR == RF
 // Front Left - ใช้พินเดิม (ปลอดภัย)
-#define ENC_FL_A 34
-#define ENC_FL_B 35 // (input-only, ปลอดภัย)
+#define ENC_FL_A 16 
+#define ENC_FL_B 19 // (input-only, ปลอดภัย)
 
 // Rear Left - ใช้พินเดิม (ปลอดภัย)
-#define ENC_RL_A 18
-#define ENC_RL_B 36
+#define ENC_RL_A 13 
+#define ENC_RL_B 17
 
 // Front Right - ย้ายจาก GPIO4 → GPIO34/35
-#define ENC_FR_A 13
-#define ENC_FR_B 17
+#define ENC_FR_A 18
+#define ENC_FR_B 36
 
 // Rear Right - ย้ายจาก GPIO2,5 → GPIO34,36
-#define ENC_RR_A 16
-#define ENC_RR_B 19
+#define ENC_RR_A 34
+#define ENC_RR_B 35
 
 // Encoder direction correction (+1 / -1)
 #define ENC_INV_FL (+1)

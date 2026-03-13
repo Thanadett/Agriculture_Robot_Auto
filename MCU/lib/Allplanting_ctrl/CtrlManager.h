@@ -4,7 +4,7 @@
 #include <AccelStepper.h>
 #include "config.h"
 
-enum TaskMode { IDLE, PLANTING, LOADING, TESTING, MOVECAM_UP, MOVECAM_DOWN, RESET };
+enum TaskMode { IDLE, FIX, LOADING, PLANTING, MOVECAM_UP, MOVECAM_DOWN, RESET };
 class PlantingManager {
 private:
     TaskMode _activeMode = IDLE;
@@ -54,9 +54,9 @@ public:
     int moveToAngle(int desireAngle, int maxAngle); //function for TD8135
     void begin(); // command to start
     // void runStepper(); 
-    void startPlantPattern();
+    void startFixPattern();
     void LoadPattern();
-    void testpattern();
+    void startPlantpattern();
     void mv_cam_up_pattern();
     void mv_cam_down_pattern();
     void resetPattern();

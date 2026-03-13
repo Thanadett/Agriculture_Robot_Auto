@@ -19,7 +19,7 @@ PlantingManager robot;
 // micro-ROS entities
 rcl_publisher_t feedback_pub;
 rcl_subscription_t command_sub;
-rcl_subscription_t vision_sub; 
+// rcl_subscription_t vision_sub; 
 std_msgs__msg__String feedback_msg;
 std_msgs__msg__String command_msg; 
 
@@ -37,9 +37,11 @@ enum RobotCommand {
   CMD_NONE,
   CMD_RESET,
   CMD_STOP,
-  CMD_PLANT1,
+  CMD_PLANT1B,
+  CMD_PLANT1A,
   CMD_PLANT2,
-  CMD_CAMUP,
+  // CMD_CAMUP,
+  CMD_UP,
   CMD_LOAD 
 };
 
@@ -77,16 +79,16 @@ void waitRobotStop() {
 // Callback สำหรับ vision_debug
 volatile bool cam_has_moved = false;
 
-void vision_callback(const void * msgin) {
-  const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msgin;
-  if (msg->data.size > 0) {
-    vision_state_val = msg->data.data[0];
-    if (vision_state_val == 4.0f && pending_cmd == CMD_NONE && !cam_has_moved) {
-      pending_cmd = CMD_CAMUP;
-      cam_has_moved = true; // ล็อคไม่ให้ขยับซ้ำ
-    }
-  }
-}
+// void vision_callback(const void * msgin) {
+//   const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msgin;
+//   if (msg->data.size > 0) {
+//     vision_state_val = msg->data.data[0];
+//     if (vision_state_val == 4.0f && pending_cmd == CMD_NONE && !cam_has_moved) {
+//       pending_cmd = CMD_CAMUP;
+//       cam_has_moved = true; // ล็อคไม่ให้ขยับซ้ำ
+//     }
+//   }
+// }
 
 
 void command_callback(const void * msgin) {
@@ -106,15 +108,21 @@ void command_callback(const void * msgin) {
   else if (cmd == "DONE:STOP") {
     pending_cmd = CMD_STOP;
   }
-  else if (cmd == "DONE:planting1") {
-    pending_cmd = CMD_PLANT1;
+  else if (cmd == "DONE:planting1B") {
+    pending_cmd = CMD_PLANT1B;
+  }
+  else if (cmd == "DONE:planting1A") {
+    pending_cmd = CMD_PLANT1A;
   }
   else if (cmd == "DONE:planting2") {
     pending_cmd = CMD_PLANT2;
   }
   else if (cmd == "DONE:load") { 
     pending_cmd = CMD_LOAD;
-}
+  }
+  else if (cmd == "DONE:up") {
+    pending_cmd = CMD_UP;
+  }
 }
 
 void setup() {
@@ -151,8 +159,8 @@ void setup() {
   // Subscriber setup (Int32)
   rclc_subscription_init_default(&command_sub, &node, 
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String), "/msg");
-  rclc_subscription_init_default(&vision_sub, &node, 
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/vision_debug");
+  // rclc_subscription_init_default(&vision_sub, &node, 
+    // ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/vision_debug");
   
     // จอง Memory สำหรับ String Messages
   command_msg.data.capacity = 50; 
@@ -168,7 +176,7 @@ void setup() {
   // Executor (สำคัญ: ต้องมี 1 handle สำหรับ subscriber)
   rclc_executor_init(&executor, &support.context, 2, &allocator);
   rclc_executor_add_subscription(&executor, &command_sub, &command_msg, &command_callback, ON_NEW_DATA);
-  rclc_executor_add_subscription(&executor, &vision_sub, &vision_msg, &vision_callback, ON_NEW_DATA);
+  // rclc_executor_add_subscription(&executor, &vision_sub, &vision_msg, &vision_callback, ON_NEW_DATA);
 
   state = AGENT_CONNECTED;
 }
@@ -198,9 +206,16 @@ void loop() {
         publish_feedback("SUCCESS");
       }
 
-      else if (cmd == CMD_PLANT1) {
-        publish_feedback("planting");
-        robot.testpattern();
+      else if (cmd == CMD_PLANT1B) {
+        publish_feedback("plantingB");
+        robot.startFixPattern();
+        waitRobotStop();
+        publish_feedback("SUCCESS");
+      }
+
+      else if (cmd == CMD_PLANT1A) {
+        publish_feedback("plantingA");
+        robot.startPlantpattern();
         waitRobotStop();
         publish_feedback("SUCCESS");
       }
@@ -210,23 +225,36 @@ void loop() {
         robot.LoadPattern();
         waitRobotStop();
 
-        publish_feedback("planting");
-        robot.testpattern();
+        publish_feedback("planting2");
+        robot.startPlantpattern();
         waitRobotStop();
+
+        publish_feedback("moving camera up"); 
+        robot.mv_cam_up_pattern();          
+        waitRobotStop();    
+
+        publish_feedback("startc"); 
 
         publish_feedback("SUCCESS");
       }
 
-      else if (cmd == CMD_CAMUP) {
-        publish_feedback("moving camera up");
-        robot.mv_cam_up_pattern();
-        waitRobotStop();
-        publish_feedback("SUCCESS");
-      }
+      // else if (cmd == CMD_CAMUP) {
+      //   publish_feedback("moving camera up");
+      //   robot.mv_cam_up_pattern();
+      //   waitRobotStop();
+      //   publish_feedback("SUCCESS");
+      // }
 
       else if (cmd == CMD_LOAD) {
         publish_feedback("loading");
         robot.LoadPattern();
+        waitRobotStop();
+        publish_feedback("SUCCESS");
+      }
+
+      else if (cmd == CMD_UP) {
+        publish_feedback("moving camera up");
+        robot.mv_cam_up_pattern();
         waitRobotStop();
         publish_feedback("SUCCESS");
       }
