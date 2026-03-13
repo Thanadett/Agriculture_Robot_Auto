@@ -23,8 +23,8 @@ def generate_launch_description():
         executable='cabbage_camera_publisher',
         parameters=[{
             'camera_id': '/dev/webcam_EYD_1080p',
-            'image_width': 320,
-            'image_height': 240,
+            'image_width': 640,
+            'image_height': 480,
             'fps': 10,
             'jpeg_quality': 40,
             'publish_raw': False,
