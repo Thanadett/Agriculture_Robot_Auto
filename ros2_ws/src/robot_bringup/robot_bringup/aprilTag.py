@@ -5,6 +5,8 @@ from rclpy.node import Node
 
 import cv2
 import numpy as np
+
+from sensor_msgs.msg import CompressedImage
 from pupil_apriltags import Detector
 
 
@@ -20,36 +22,37 @@ class AprilTagCamera(Node):
         self.cy = 236.91812
         self.tag_size = 0.04
 
-        # ---------------- Camera ----------------
-        self.cap = cv2.VideoCapture(4)
-        self.cap.set(3, 640)
-        self.cap.set(4, 480)
-
-        if not self.cap.isOpened():
-            self.get_logger().error("Cannot open camera")
-            exit()
-
         # ---------------- AprilTag Detector ----------------
         self.detector = Detector(
             families="tagStandard52h13",
             nthreads=1,
-            quad_decimate=1.0,      # เสถียรกว่า
+            quad_decimate=1.0,
             refine_edges=True
         )
 
-        self.timer = self.create_timer(0.03, self.loop)
+        # ---------------- Subscriber ----------------
+        self.sub = self.create_subscription(
+            CompressedImage,
+            "/camera/image_raw/compressed",
+            self.image_callback,
+            10
+        )
 
-        self.get_logger().info("AprilTag X11 Debug started")
+        self.get_logger().info("AprilTag X11 Debug started (CompressedImage)")
 
 
-    def loop(self):
+    def image_callback(self, msg):
 
-        ret, frame = self.cap.read()
-        if not ret:
+        # ---------------- Decode compressed image ----------------
+        np_arr = np.frombuffer(msg.data, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if frame is None:
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # ---------------- Detect AprilTag ----------------
         tags = self.detector.detect(
             gray,
             estimate_tag_pose=True,
@@ -63,11 +66,11 @@ class AprilTagCamera(Node):
             R = tag.pose_R
 
             # ===============================
-            # 1️⃣  Parallel angle (ถูกต้อง)
+            # 1️⃣ Parallel angle
             # ===============================
 
-            normal = R[:, 2]                 # แกน Z ของ tag
-            camera_forward = np.array([0,0,1])
+            normal = R[:, 2]
+            camera_forward = np.array([0, 0, 1])
 
             cos_angle = np.dot(normal, camera_forward)
             cos_angle = np.clip(cos_angle, -1.0, 1.0)
@@ -75,11 +78,11 @@ class AprilTagCamera(Node):
             parallel_error = np.degrees(np.arccos(cos_angle))
 
             # ===============================
-            # 2️⃣  Lateral error สำหรับหมุน
+            # 2️⃣ Lateral error
             # ===============================
 
-            lateral_error = tx      # ซ้ายขวา
-            distance = tz           # ระยะตรงเข้า
+            lateral_error = tx
+            distance = tz
 
             self.get_logger().info(
                 f"ID={tag.tag_id} "
@@ -92,32 +95,40 @@ class AprilTagCamera(Node):
             corners = tag.corners.astype(int)
 
             for i in range(4):
-                cv2.line(frame,
-                         tuple(corners[i]),
-                         tuple(corners[(i+1)%4]),
-                         (0,255,0), 2)
+                cv2.line(
+                    frame,
+                    tuple(corners[i]),
+                    tuple(corners[(i+1)%4]),
+                    (0,255,0), 2
+                )
 
             # ---------------- Draw info ----------------
-            cv2.putText(frame,
-                        f"Z={distance:.2f}m",
-                        (corners[0][0], corners[0][1]-40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0,255,0), 2)
+            cv2.putText(
+                frame,
+                f"Z={distance:.2f}m",
+                (corners[0][0], corners[0][1]-40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0), 2
+            )
 
-            cv2.putText(frame,
-                        f"tx={lateral_error:.2f}m",
-                        (corners[0][0], corners[0][1]-20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0,255,0), 2)
+            cv2.putText(
+                frame,
+                f"tx={lateral_error:.2f}m",
+                (corners[0][0], corners[0][1]-20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0), 2
+            )
 
-            cv2.putText(frame,
-                        f"parallel={parallel_error:.1f}deg",
-                        (corners[0][0], corners[0][1]),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0,255,0), 2)
+            cv2.putText(
+                frame,
+                f"parallel={parallel_error:.1f}deg",
+                (corners[0][0], corners[0][1]),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0,255,0), 2
+            )
 
         cv2.imshow("AprilTag Debug", frame)
 
@@ -129,6 +140,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = AprilTagCamera()
     rclpy.spin(node)
+
     node.destroy_node()
     cv2.destroyAllWindows()
 
