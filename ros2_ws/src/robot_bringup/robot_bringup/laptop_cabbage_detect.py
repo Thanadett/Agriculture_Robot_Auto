@@ -1,36 +1,3 @@
-"""
-Green Circle Detector v4.2 — Hollow circle (green edge only)
-===========================================================
-[Updated] Process every 5 frames + show only circles with diameter >= 20 cm
-          Camera distance: 28 cm
-          - PX_PER_CM = 21.62 (measured from real object diameter=15.91cm, radius=172px)
-          - Display diameter (d) instead of radius (r)
-          - Use float throughout all calculations
-          - Capture image only when object diameter >= MIN_RADIUS_CM*2
-
-[v4 Change] Added ROS2 subscriber mode (--ros2 flag)
-            Receives compressed image from /camera_side/image_raw/compressed topic
-            instead of opening camera directly — suitable for running detector on laptop
-            while Pi5 handles camera publishing.
-
-[v4.1 Change] Added cabbage validation filters before capture:
-              1. Solidity Check   — contour must be round/compact (>= CABBAGE_SOLIDITY_MIN)
-              2. Fill Color Check — inside of circle must be mostly green (>= CABBAGE_FILL_MIN)
-              Both filters must pass before entering MEASURE stage.
-              Use --no-cabbage-filter to disable for debugging.
-
-[v4.2 Change]
-  - Detection gate: locked at startup, unlocked by "startc" on /plant_feedback.
-    Waits PLANTING_WARMUP_SEC before detection starts.
-  - Measurement log: every capture appends diameter to running session list and
-    publishes "LOG:[d1 d2 ...]" to /msg topic (ROS2 mode).
-    Camera-only mode prints log to terminal instead.
-  - skimage lazy import: imported inside arc_hog_score() only — node starts even
-    if scikit-image is not installed in the system Python.
-  - Default mode: if no --ros2 / --camera / --image argument given, defaults to
-    --ros2 automatically (suitable for ROS2 entry-point launch).
-"""
-
 import csv
 import cv2
 import numpy as np
@@ -78,38 +45,27 @@ PROCESS_EVERY_N_FRAMES = 4
 # ══════════════════════════════════════════════════════════════
 #  DETECTION GATE PARAMETERS  [v4.2]
 # ══════════════════════════════════════════════════════════════
-# Detection is LOCKED at startup.
-# Unlocked only after receiving "startc" on /plant_feedback topic.
-# After receiving, waits PLANTING_WARMUP_SEC before detection starts.
 PLANTING_WARMUP_SEC = 5.0   # seconds to wait after startc before detecting
 
 # ══════════════════════════════════════════════════════════════
 #  CABBAGE VALIDATION PARAMETERS  [v4.1]
 # ══════════════════════════════════════════════════════════════
-# Solidity = contour area / convex hull area
-# A perfect circle = 1.0  |  irregular/partial shape < 0.85
 CABBAGE_SOLIDITY_MIN  = 0.85   # minimum solidity to pass
-
-# Fill ratio = fraction of pixels INSIDE the detected circle that are green (HSV)
 CABBAGE_FILL_MIN      = 0.40   # minimum green fill ratio to pass (0.0–1.0)
-
-# Enable/disable cabbage filter globally (overridden by --no-cabbage-filter)
 CABBAGE_FILTER_ENABLED = True
 
 # ══════════════════════════════════════════════════════════════
 #  SESSION MEASUREMENT LOG  [v4.2]
 # ══════════════════════════════════════════════════════════════
-_measurement_log: list = []   # running list of diameter_cm values this session
+_measurement_log: list = []
 DEFAULT_LOG_FILE = os.path.join(SAVE_DIR, "measurement_log.csv")
 
 
 def log_measurement(diameter_cm, log_file=DEFAULT_LOG_FILE, ros2_publisher=None):
     """
     Append diameter_cm to the in-memory session log.
+    Publishes "LOG:[d1 d2 ...]" to /msg via ros2_publisher.
     Also appends a row to CSV for persistence.
-
-    ROS2 mode  : publishes "LOG:[d1 d2 ...]" to /msg via ros2_publisher.
-    Camera mode: prints running log to terminal.
     """
     _measurement_log.append(round(diameter_cm, 2))
 
@@ -121,11 +77,6 @@ def log_measurement(diameter_cm, log_file=DEFAULT_LOG_FILE, ros2_publisher=None)
         out = RosString()
         out.data = log_msg
         ros2_publisher.publish(out)
-    else:
-        print(f"\n{'─'*55}")
-        print(f"  [MEASUREMENT LOG] {len(_measurement_log)} capture(s) this session:")
-        print(f"  [{values_str}]")
-        print(f"{'─'*55}")
 
     # Always append to CSV
     ensure_save_dir()
@@ -269,8 +220,7 @@ def detect_green_circles(bgr_img,
                           hog_thresh=0.50,
                           min_radius=15,
                           max_radius=500,
-                          edge_thickness=6,
-                          debug=False):
+                          edge_thickness=6):
     img_h, img_w = bgr_img.shape[:2]
     gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
 
@@ -281,7 +231,6 @@ def detect_green_circles(bgr_img,
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_NONE)
     candidates = []
-    debug_info = []
 
     for cnt in contours:
         if cv2.arcLength(cnt, False) < 30:
@@ -293,8 +242,6 @@ def detect_green_circles(bgr_img,
         roi_gray = gray[y1:y2, x1:x2]
         score = arc_hog_score(roi_gray)
 
-        if debug:
-            debug_info.append(dict(cnt=cnt, score=score, passed=score >= hog_thresh))
         if score < hog_thresh:
             continue
 
@@ -315,7 +262,7 @@ def detect_green_circles(bgr_img,
         candidates.append((ccx, ccy, cr, n_in))
 
     results = nms_circles(candidates)
-    return results, green_mask, combined, debug_info
+    return results, green_mask, combined
 
 
 # ══════════════════════════════════════════════════════════════
@@ -510,7 +457,6 @@ class CaptureState:
 
     publish_callback : callable() → publishes SUCCESS to /capture_feedback
     log_publisher    : rclpy Publisher(String) → publishes LOG:[...] to /msg
-                       If None, log is printed to terminal.
     log_file         : CSV path for persistent measurement log
     """
     def __init__(self, publish_callback=None, log_publisher=None,
@@ -619,7 +565,6 @@ def check_and_capture(frame, circles, center_x, cap_counter, state=None):
         std_r  = float(np.std(r_clean))
         d_cm   = px_to_cm(avg_r) * 2
 
-        # [v4.2] Log measurement — publish to /msg or print to terminal
         log_measurement(d_cm, log_file=state.log_file,
                         ros2_publisher=state.log_publisher)
 
@@ -682,160 +627,10 @@ def draw_overlay(frame, circles, frame_num):
 
     valid_count = sum(1 for c in circles if c[2] >= MIN_CAPTURE_RADIUS)
     info = (f"Circles(>={MIN_RADIUS_CM*2}cm diam): {valid_count}/{len(circles)}"
-            f"  Frame:{frame_num}  Q=quit  S=shot  M=mask")
+            f"  Frame:{frame_num}  Q=quit  M=mask")
     cv2.putText(frame, info, (8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
     return frame
-
-
-def visualize_static(bgr_img, circles, green_mask, combined,
-                     debug_info=None, save_path=None):
-    out = bgr_img.copy()
-    for cx, cy, r, n_in in circles:
-        d_cm = px_to_cm(r) * 2
-        icx, icy, ir = int(round(cx)), int(round(cy)), int(round(r))
-        cv2.circle(out, (icx, icy), ir, (0, 0, 255), 2)
-        cv2.circle(out, (icx, icy), 4, (255, 0, 0), -1)
-        cv2.putText(out, f"d={r*2:.1f}px ({d_cm:.2f}cm)",
-                    (max(0, icx-ir), max(15, icy-ir-6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
-
-    ncols = 4 if debug_info else 3
-    fig, axes = plt.subplots(1, ncols, figsize=(5*ncols, 5))
-    axes[0].imshow(cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB))
-    axes[0].set_title("Input"); axes[0].axis("off")
-    axes[1].imshow(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
-    axes[1].set_title(f"Result ({len(circles)} circles)"); axes[1].axis("off")
-    axes[2].imshow(combined, cmap="gray")
-    axes[2].set_title("Green Edge + Canny"); axes[2].axis("off")
-    if debug_info:
-        dbg = bgr_img.copy()
-        for d in debug_info:
-            col = (0,255,0) if d["passed"] else (80,80,80)
-            cv2.drawContours(dbg, [d["cnt"]], -1, col, 1)
-        axes[3].imshow(cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB))
-        axes[3].set_title("HOG filter (green=pass)"); axes[3].axis("off")
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=130, bbox_inches="tight")
-        print(f"Saved → {save_path}")
-    else:
-        plt.show()
-    plt.close()
-
-
-# ══════════════════════════════════════════════════════════════
-#  H. DIRECT CAMERA MODE
-# ══════════════════════════════════════════════════════════════
-def run_camera(camera_index='0', hog_thresh=0.50, edge_thickness=6,
-               min_radius=15, max_radius=500, show_mask=False):
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open camera index={camera_index}")
-        sys.exit(1)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-
-    frame_w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    center_x = frame_w // 2
-
-    ensure_save_dir()
-
-    print("=" * 60)
-    print(" Green Circle Detector v4.2 — Live Camera (Direct)")
-    print(f" Resolution     = {CAPTURE_WIDTH}x{CAPTURE_HEIGHT} px")
-    print(f" PX_PER_CM      = {PX_PER_CM:.4f} px/cm")
-    print(f" MIN_DIAMETER   = {MIN_RADIUS_CM*2} cm  ({MIN_CAPTURE_RADIUS*2:.2f} px)")
-    print(f" Process every  = {PROCESS_EVERY_N_FRAMES} frames")
-    print(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
-    print(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  |  fill >= {CABBAGE_FILL_MIN}")
-    print(f" Save images to : ./{SAVE_DIR}/")
-    print(" Q / ESC : quit    S : screenshot    M : toggle mask")
-    print("=" * 60)
-
-    shot_n        = 0
-    show_m        = show_mask
-    fps_t         = time.time()
-    fps_v         = 0.0
-    cap_counter   = [0]
-    # Camera mode: no ros2_publisher → log_measurement prints to terminal
-    cam_state     = CaptureState()
-
-    frame_count   = 0
-    last_circles  = []
-    last_combined = None
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.05)
-            continue
-
-        frame_count += 1
-        now = time.time()
-        fps_v = 0.9*fps_v + 0.1*(1.0/max(now-fps_t, 1e-6))
-        fps_t = now
-
-        if frame_count % PROCESS_EVERY_N_FRAMES == 0:
-            last_circles, gmask, last_combined, _ = detect_green_circles(
-                frame,
-                hog_thresh=hog_thresh,
-                edge_thickness=edge_thickness,
-                min_radius=min_radius,
-                max_radius=max_radius,
-            )
-            check_and_capture(frame, last_circles, center_x, cap_counter, state=cam_state)
-
-        disp = draw_overlay(frame.copy(), last_circles, frame_count)
-        draw_centerline_overlay(disp, last_circles, center_x)
-
-        is_processed = (frame_count % PROCESS_EVERY_N_FRAMES == 0)
-        proc_label   = "DETECT" if is_processed else f"skip ({frame_count % PROCESS_EVERY_N_FRAMES}/{PROCESS_EVERY_N_FRAMES})"
-        proc_color   = (0, 255, 150) if is_processed else (150, 150, 150)
-        cv2.putText(disp, proc_label,
-                    (disp.shape[1]-120, 62),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, proc_color, 1)
-
-        cv2.putText(disp, f"FPS:{fps_v:.1f}",
-                    (disp.shape[1]-80, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-        cv2.putText(disp, f"Cap:{cap_counter[0]}",
-                    (disp.shape[1]-80, 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,255,150), 1)
-
-        if CABBAGE_FILTER_ENABLED:
-            cv2.putText(disp, "CAB-FILTER:ON",
-                        (8, disp.shape[0]-20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 100), 1)
-
-        if show_m and last_combined is not None:
-            mh, mw = last_combined.shape
-            sm = cv2.resize(last_combined, (mw//4, mh//4))
-            sm_bgr = cv2.cvtColor(sm, cv2.COLOR_GRAY2BGR)
-            dh, dw = disp.shape[:2]
-            sh, sw = sm_bgr.shape[:2]
-            disp[dh-sh:dh, dw-sw:dw] = sm_bgr
-            cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
-
-        cv2.imshow("Green Circle Detector v4.2", disp)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord('q'), ord('Q'), 27):
-            break
-        elif key in (ord('s'), ord('S')):
-            shot_n += 1
-            fn = f"screenshot_{shot_n:03d}.png"
-            cv2.imwrite(fn, disp)
-            print(f"[Screenshot] -> {fn}")
-        elif key in (ord('m'), ord('M')):
-            show_m = not show_m
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print(f"Closed. Total captures: {cap_counter[0]} -> ./{SAVE_DIR}/")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -873,7 +668,6 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             # Publishers
             self.feedback_pub = self.create_publisher(String, '/capture_feedback', 10)
-            # [v4.2] Measurement log publisher on /msg
             self.log_pub = self.create_publisher(String, '/msg', 10)
 
             self.cam_state = CaptureState(
@@ -937,7 +731,6 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
         def cmd_callback(self, msg):
             cmd = msg.data.strip()
-            # Ignore log messages published by this node itself
             if cmd.startswith("LOG:"):
                 return
             self.last_msg_received = f"/msg: {cmd}"
@@ -972,7 +765,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             gate_active = (self.gate_state == "DETECTING")
 
             if gate_active and self.frame_count % PROCESS_EVERY_N_FRAMES == 0:
-                self.last_circles, _, self.last_combined, _ = detect_green_circles(
+                self.last_circles, _, self.last_combined = detect_green_circles(
                     frame,
                     hog_thresh=self.hog_thresh,
                     edge_thickness=self.edge_thickness,
@@ -1094,34 +887,22 @@ def main():
     global CABBAGE_SOLIDITY_MIN, CABBAGE_FILL_MIN, CABBAGE_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v4.2 — Hollow green-edge circles + cabbage filter"
+        description="Green Circle Detector v4.2 — ROS2 mode only"
     )
-
-    def camera_input(value):
-        try:
-            return int(value)
-        except ValueError:
-            return value
-
-    parser.add_argument("--camera",    type=camera_input, default=None)
-    parser.add_argument("--ros2",      action="store_true")
-    parser.add_argument("--image",     default=None)
-    parser.add_argument("--save",      default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
-    parser.add_argument("--thickness", type=int,   default=6)
-    parser.add_argument("--min-r",     type=int,   default=15)
-    parser.add_argument("--max-r",     type=int,   default=500)
-    parser.add_argument("--mask",      action="store_true")
-    parser.add_argument("--debug",     action="store_true")
-    parser.add_argument("--focal",     type=float, default=FOCAL_LENGTH_PX)
-    parser.add_argument("--distance",  type=float, default=CAMERA_DISTANCE_CM)
-    parser.add_argument("--min-cm",    type=float, default=MIN_RADIUS_CM)
-    parser.add_argument("--every",     type=int,   default=PROCESS_EVERY_N_FRAMES)
-    parser.add_argument("--width",     type=int,   default=CAPTURE_WIDTH)
-    parser.add_argument("--height",    type=int,   default=CAPTURE_HEIGHT)
-    parser.add_argument("--px-per-cm", type=float, default=PX_PER_CM)
-    parser.add_argument("--measure-delay", type=float, default=MEASURE_DELAY)
-    parser.add_argument("--center-tol",    type=int,   default=CENTER_TOL)
+    parser.add_argument("--threshold",    type=float, default=0.50)
+    parser.add_argument("--thickness",    type=int,   default=6)
+    parser.add_argument("--min-r",        type=int,   default=15)
+    parser.add_argument("--max-r",        type=int,   default=500)
+    parser.add_argument("--mask",         action="store_true")
+    parser.add_argument("--focal",        type=float, default=FOCAL_LENGTH_PX)
+    parser.add_argument("--distance",     type=float, default=CAMERA_DISTANCE_CM)
+    parser.add_argument("--min-cm",       type=float, default=MIN_RADIUS_CM)
+    parser.add_argument("--every",        type=int,   default=PROCESS_EVERY_N_FRAMES)
+    parser.add_argument("--width",        type=int,   default=CAPTURE_WIDTH)
+    parser.add_argument("--height",       type=int,   default=CAPTURE_HEIGHT)
+    parser.add_argument("--px-per-cm",    type=float, default=PX_PER_CM)
+    parser.add_argument("--measure-delay",type=float, default=MEASURE_DELAY)
+    parser.add_argument("--center-tol",   type=int,   default=CENTER_TOL)
     parser.add_argument("--no-cabbage-filter", action="store_true")
     parser.add_argument("--solidity-min", type=float, default=CABBAGE_SOLIDITY_MIN)
     parser.add_argument("--fill-min",     type=float, default=CABBAGE_FILL_MIN)
@@ -1145,39 +926,13 @@ def main():
     CABBAGE_SOLIDITY_MIN   = args.solidity_min
     CABBAGE_FILL_MIN       = args.fill_min
 
-    # [v4.2] Default to ROS2 mode when launched with no mode argument
-    if args.ros2 or (args.camera is None and args.image is None):
-        run_ros2(hog_thresh=args.threshold, edge_thickness=args.thickness,
-                 min_radius=args.min_r, max_radius=args.max_r, show_mask=args.mask)
-        return
-
-    if args.camera is not None:
-        run_camera(camera_index=args.camera, hog_thresh=args.threshold,
-                   edge_thickness=args.thickness, min_radius=args.min_r,
-                   max_radius=args.max_r, show_mask=args.mask)
-        return
-
-    # Image mode
-    bgr = cv2.imread(args.image)
-    if bgr is None:
-        print(f"[ERROR] File not found: {args.image}")
-        return
-
-    circles, gmask, combined, dbg = detect_green_circles(
-        bgr, hog_thresh=args.threshold, edge_thickness=args.thickness,
-        min_radius=args.min_r, max_radius=args.max_r, debug=args.debug)
-
-    print(f"\nDetected {len(circles)} circle(s):")
-    for i, (cx, cy, r, n_in) in enumerate(circles, 1):
-        d_cm = px_to_cm(r) * 2
-        passed, solidity, fill = is_cabbage(bgr, cx, cy, r, debug_print=True)
-        cab_str = "CABBAGE✓" if passed else "NOT-CABBAGE✗"
-        print(f"  [{i}] center=({cx:.1f},{cy:.1f})  diameter={r*2:.1f}px ({d_cm:.2f}cm)"
-              f"  inliers={n_in}  {cab_str}")
-
-    visualize_static(bgr, circles, gmask, combined,
-                     debug_info=dbg if args.debug else None,
-                     save_path=args.save)
+    run_ros2(
+        hog_thresh=args.threshold,
+        edge_thickness=args.thickness,
+        min_radius=args.min_r,
+        max_radius=args.max_r,
+        show_mask=args.mask,
+    )
 
 
 if __name__ == "__main__":
