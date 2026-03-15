@@ -81,8 +81,8 @@ class CameraPublisher(Node):
         self.declare_parameter('publish_raw',      False)
         self.declare_parameter('use_x11_debug',    False)
         self.declare_parameter('manual_exposure',  True)
-        self.declare_parameter('exposure_value',   150)    # ลองปรับ 50–500
-        self.declare_parameter('clahe_clip_limit', 2.0)
+        self.declare_parameter('exposure_value',   1000)    # ลองปรับ 50–500
+        self.declare_parameter('clahe_clip_limit', 4.0)
         self.declare_parameter('clahe_tile_w',     8)
         self.declare_parameter('clahe_tile_h',     8)
 
