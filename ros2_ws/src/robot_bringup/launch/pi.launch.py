@@ -8,7 +8,7 @@ def generate_launch_description():
         package='robot_bringup',
         executable='pi_camera_publisher',
         parameters=[{
-            'camera_id': '/dev/webcam_EYD_2k',
+            'camera_id': '/dev/webcam_Numwo_NWC590',
             'image_width': 640,
             'image_height': 480,
             'fps': 20,
