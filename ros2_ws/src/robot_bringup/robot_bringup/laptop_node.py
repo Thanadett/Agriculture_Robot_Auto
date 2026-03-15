@@ -44,8 +44,8 @@ STATE_NAME = {
 # ════════════════════════════════════════════════════════════════
 # Tuning
 # ════════════════════════════════════════════════════════════════
-Z_ALIGN   = 0.48
-Z_FORWARD = 0.42
+Z_ALIGN   = 0.60
+Z_FORWARD = 0.52
 Z_STOP    = 0.25
 
 APPROACH_KP        = 0.80
@@ -57,12 +57,13 @@ APPROACH_BEAR_DEAD = math.radians(2.0)
 
 ALIGN_KP       = 0.40
 ALIGN_KI       = 0.00
-ALIGN_KD       = 0.10
-ALIGN_W_MAX    = 0.30
-ALIGN_V        = 0.20
+ALIGN_KD       = 0.25          # ★ เพิ่มจาก 0.10 → เบรกแรงขึ้น
+ALIGN_W_MAX    = 0.22          # ★ ลดจาก 0.30 → หมุนช้าลง overshoot น้อยลง
+ALIGN_V        = 0.10          # ★ ลดจาก 0.20 → ลด inertia ขณะหมุน
 ALIGN_YAW_DEAD = math.radians(2.5)
+ALIGN_BRAKE_ZONE = math.radians(8.0)   # ★ ใหม่: เริ่ม scale-down angular ก่อนถึง dead zone
 ALIGN_STABLE_REQUIRED = 8
-ALIGN_YAW_TIMEOUT     = 1.5   # ★ ถ้า yaw error < dead zone นานเกินนี้ (วินาที) → FORWARD
+ALIGN_YAW_TIMEOUT     = 1.5   # ถ้า yaw error < dead zone นานเกินนี้ (วินาที) → FORWARD
 
 FORWARD_V = 0.20
 SEARCH_W  = 0.00
@@ -241,7 +242,8 @@ class AprilTagServo(Node):
             f" | cmd→{self._cmd_topic} | tag_id={self.target_tag_id}"
             f" | x_offset={self._target_x_offset:.3f}m"
             f" | align_x_thresh={self._align_x_thresh:.3f}m"
-            f" | target_yaw={math.degrees(self._align_target_yaw):.1f}°")
+            f" | target_yaw={math.degrees(self._align_target_yaw):.1f}°"
+            f" | brake_zone={math.degrees(ALIGN_BRAKE_ZONE):.1f}°")
 
     # ── Parameters ───────────────────────────────────────────────
     def _declare_params(self):
@@ -258,9 +260,9 @@ class AprilTagServo(Node):
         d('dist_k1',  0.21581633); d('dist_k2', -1.09508649)
         d('dist_p1', -0.00213472); d('dist_p2',  0.00169510)
         d('dist_k3',  1.64003200)
-        d('target_x_offset', 0.037)
-        d('align_x_thresh', 0.037)
-        d('align_target_yaw_deg', 9.1)
+        d('target_x_offset', 0.04)
+        d('align_x_thresh', 0.04)
+        d('align_target_yaw_deg', 8.7)
 
     def _load_params(self):
         g = self.get_parameter
@@ -329,8 +331,8 @@ class AprilTagServo(Node):
         self.locked_tag_id = None; self.lock_lost_frames = 0
         self.prelock_id = None; self.prelock_count = 0
         self._align_stable_frames = 0
-        self._align_yaw_sign = -1.0   # default = RIGHT/CENTER = -raw_w
-        self._align_yaw_ok_t = None   # ★ timestamp เมื่อ yaw error เข้า dead zone
+        self._align_yaw_sign = -1.0
+        self._align_yaw_ok_t = None
 
     # ── Detection ────────────────────────────────────────────────
     def _detect(self, frame):
@@ -496,16 +498,12 @@ class AprilTagServo(Node):
         if z <= Z_STOP:
             return STATE_DONE
 
-        # ★ FORWARD: อยู่ต่อจนถึง DONE เท่านั้น ไม่ back-step
         if self.state == STATE_FORWARD:
             return STATE_FORWARD
 
-        # ★ ALIGN: transition → FORWARD จัดการใน _control แล้ว (stable/timeout)
-        #   ที่นี่แค่คงอยู่ใน ALIGN ต่อไป
         if self.state == STATE_ALIGN:
             return STATE_ALIGN
 
-        # APPROACH/SEARCH → เข้า ALIGN เมื่อ z ถึงระยะ
         if z <= Z_ALIGN:
             return STATE_ALIGN
 
@@ -525,7 +523,6 @@ class AprilTagServo(Node):
             self._stuck_z = z; self._stuck_t = now
 
     def _check_forward_stuck(self, z):
-        """★ FORWARD เท่านั้น — ถ้า z ไม่ลดลงภายใน FORWARD_STUCK_SEC → REVERSE"""
         now = self.get_clock().now().nanoseconds / 1e9
         if self._fwd_stuck_z is None:
             self._fwd_stuck_z = z; self._fwd_stuck_t = now; return
@@ -568,10 +565,11 @@ class AprilTagServo(Node):
             now_sec   = self.get_clock().now().nanoseconds / 1e9
 
             if abs(yaw_error) < ALIGN_YAW_DEAD:
+                # ── ใน dead zone ────────────────────────────────
                 cmd.angular.z = 0.0
+                cmd.linear.x  = 0.0   # ★ หยุด linear ด้วยเมื่อ yaw นิ่งแล้ว
                 self.pid_y.reset()
                 self._align_stable_frames += 1
-                # ★ จับเวลาตั้งแต่ที่ yaw เข้า dead zone ครั้งแรก
                 if self._align_yaw_ok_t is None:
                     self._align_yaw_ok_t = now_sec
                 yaw_ok_dur = now_sec - self._align_yaw_ok_t
@@ -580,7 +578,6 @@ class AprilTagServo(Node):
                     f"  yaw={math.degrees(yaw):.1f}°"
                     f"  err={math.degrees(yaw_error):.1f}°"
                     f"  ok_dur={yaw_ok_dur:.1f}s")
-                # ★ ไป FORWARD ถ้า stable frame ครบ หรือ อยู่ใน dead zone นานพอ
                 if self._align_stable_frames >= ALIGN_STABLE_REQUIRED \
                         or yaw_ok_dur >= ALIGN_YAW_TIMEOUT:
                     self.get_logger().info(
@@ -588,17 +585,36 @@ class AprilTagServo(Node):
                         f"  (stable={self._align_stable_frames}"
                         f"  ok_dur={yaw_ok_dur:.1f}s)")
                     self._go(STATE_FORWARD, force=True)
+
             else:
-                # ★ ไม่ reset stable frames เมื่อ tag กระพริบ — reset แค่เมื่อ yaw error กลับมาใหญ่จริงๆ
+                # ── นอก dead zone ────────────────────────────────
                 if abs(yaw_error) > ALIGN_YAW_DEAD * 2:
                     self._align_stable_frames = 0
                     self._align_yaw_ok_t = None
+
                 raw_w = self.pid_y.update(yaw_error)
+
+                # ★ Brake zone: scale angular speed ลงเมื่อใกล้ถึง dead zone
+                #   เพื่อลด overshoot จาก inertia ของตัวเครื่อง
+                if abs(yaw_error) < ALIGN_BRAKE_ZONE:
+                    brake_scale = abs(yaw_error) / ALIGN_BRAKE_ZONE  # 0.0 ~ 1.0
+                    raw_w *= brake_scale
+                    self.get_logger().debug(
+                        f"[ALIGN] brake scale={brake_scale:.2f}"
+                        f"  yaw_err={math.degrees(yaw_error):.1f}°"
+                        f"  w={raw_w:.3f}")
+
                 cmd.angular.z = raw_w * self._align_yaw_sign
+
+                # ★ Linear: หยุดเดินหน้าทั้งหมดเมื่ออยู่ใน brake zone
+                #   ลด inertia ที่จะพาหมุนเกิน
+                if abs(yaw_error) < ALIGN_BRAKE_ZONE:
+                    cmd.linear.x = 0.0
+                else:
+                    cmd.linear.x = ALIGN_V * max(0.0, math.cos(yaw_error))
 
             if abs(cmd.angular.z) > 0.01:
                 self._last_wdir = math.copysign(1.0, cmd.angular.z)
-            cmd.linear.x = ALIGN_V * max(0.0, math.cos(yaw_error))
             self._check_stuck(z)
 
         elif s == STATE_FORWARD:
@@ -658,8 +674,6 @@ class AprilTagServo(Node):
                 if self.n_miss > MISS_GRACE:
                     self.n_stable = 0
 
-        # ★ LOST timeout → SCAN_BACK เฉพาะ APPROACH เท่านั้น
-        #   ALIGN และ FORWARD ถ้า tag หาย → ใช้ stuck detection จัดการ
         if self.state == STATE_APPROACH:
             if self.last_t is not None:
                 lost = (self.get_clock().now() - self.last_t).nanoseconds / 1e9
@@ -698,7 +712,7 @@ class AprilTagServo(Node):
             float(bearing)                    if bearing is not None else -999.0,
             float(self._align_stable_frames), # index 9
             float(self._align_yaw_sign),      # index 10  (+1/-1)
-            float(self.tag.x) if self.tag.x is not None else -999.0,  # index 11 x ตอนนี้
+            float(self.tag.x) if self.tag.x is not None else -999.0,  # index 11
         ]
         self.dbg_pub.publish(dbg)
 
