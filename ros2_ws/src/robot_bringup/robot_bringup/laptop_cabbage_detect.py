@@ -33,8 +33,9 @@ REFERENCE_WIDTH    = 640    # px  — width used when measuring FOCAL_LENGTH_PX
 
 FOCAL_LENGTH_SCALED = FOCAL_LENGTH_PX * (CAPTURE_WIDTH / REFERENCE_WIDTH)
 
-# ── PX_PER_CM calculated from real measurement ──
-PX_PER_CM = 29.27   # px/cm — hardcoded from real measurement
+# ── PX_PER_CM calibrated: old=29.27, real=15.75cm, reported=14.71cm
+#    new = 29.27 × (14.71 / 15.75) = 27.34
+PX_PER_CM = 27.34   # px/cm — calibrated from real measurement
 
 # MIN_CAPTURE_RADIUS stored as float
 MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # minimum radius in px (float)
@@ -43,7 +44,7 @@ MIN_CAPTURE_RADIUS = MIN_RADIUS_CM * PX_PER_CM  # minimum radius in px (float)
 PROCESS_EVERY_N_FRAMES = 4
 
 # ══════════════════════════════════════════════════════════════
-#  DETECTION GATE PARAMETERS  [v4.2]
+#  DETECTION GATE PARAMETERS  [v4.4]
 # ══════════════════════════════════════════════════════════════
 PLANTING_WARMUP_SEC = 5.0   # seconds to wait after startc before detecting
 
@@ -55,7 +56,7 @@ CABBAGE_FILL_MIN      = 0.40   # minimum green fill ratio to pass (0.0–1.0)
 CABBAGE_FILTER_ENABLED = True
 
 # ══════════════════════════════════════════════════════════════
-#  SESSION MEASUREMENT LOG  [v4.2]
+#  SESSION MEASUREMENT LOG  [v4.4]
 # ══════════════════════════════════════════════════════════════
 _measurement_log: list = []
 DEFAULT_LOG_FILE = os.path.join(SAVE_DIR, "measurement_log.csv")
@@ -65,7 +66,7 @@ def log_measurement(diameter_cm, log_file=DEFAULT_LOG_FILE, ros2_publisher=None)
     """
     Append diameter_cm to the in-memory session log.
     Publishes "LOG:[d1 d2 ...]" to /msg via ros2_publisher.
-    Also appends a row to CSV for persistence.
+    Also appends a row to CSV — timestamp is the primary key.
     """
     _measurement_log.append(round(diameter_cm, 2))
 
@@ -78,15 +79,13 @@ def log_measurement(diameter_cm, log_file=DEFAULT_LOG_FILE, ros2_publisher=None)
         out.data = log_msg
         ros2_publisher.publish(out)
 
-    # Always append to CSV
     ensure_save_dir()
     file_exists = os.path.isfile(log_file)
     with open(log_file, "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["capture_index", "diameter_cm", "timestamp"])
-        writer.writerow([len(_measurement_log), round(diameter_cm, 2),
-                         time.strftime("%Y-%m-%d %H:%M:%S")])
+            writer.writerow(["timestamp", "diameter_cm"])
+        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), round(diameter_cm, 2)])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -127,7 +126,7 @@ def arc_hog_score(gray_roi):
         return 0.0
 
     size = max(h, w)
-    # ต้องหาร 8 ลงตัวสำหรับ HOGDescriptor และต้องมากกว่า block_size (16)
+    # must be divisible by 8 and >= 16 for HOGDescriptor
     size = max((size // 8) * 8, 16)
 
     resized = cv2.resize(gray_roi, (size, size))
@@ -455,35 +454,41 @@ def draw_capture_annotation(frame, cx, cy, cr, center_x,
 
 
 # ══════════════════════════════════════════════════════════════
-#  CAPTURE STATE
+#  CAPTURE STATE  [v4.4]
 # ══════════════════════════════════════════════════════════════
 class CaptureState:
     """
-    State machine:
-        IDLE      ──(object enters centerline AND passes cabbage filter)──► MEASURING
-        MEASURING ──(MEASURE_DELAY elapsed)──► fires capture → locked
-        MEASURING ──(object leaves centerline)──► IDLE (reset, no capture)
+    One capture per startc session — hard locked until DONE:cabbage.
 
-    publish_callback : callable() → publishes SUCCESS to /capture_feedback
-    log_publisher    : rclpy Publisher(String) → publishes LOG:[...] to /msg
-    log_file         : CSV path for persistent measurement log
+    State machine:
+        IDLE      ──(object on centerline + cabbage pass)──► MEASURING
+        MEASURING ──(MEASURE_DELAY elapsed)──────────────► fires capture → LOCKED
+        MEASURING ──(object leaves centerline)───────────► IDLE (no capture)
+        LOCKED    ──(DONE:cabbage received)──────────────► IDLE (ready for next startc)
     """
     def __init__(self, publish_callback=None, log_publisher=None,
                  log_file=DEFAULT_LOG_FILE):
         self.last_capture_t   = 0.0
         self.must_exit_first  = False
-        self.capture_done     = False
+        self.capture_done     = False   # True = LOCKED
         self.publish_callback = publish_callback
         self.log_publisher    = log_publisher
         self.log_file         = log_file
-        self.reset()
+        self._reset_measuring()
 
-    def reset(self):
+    def _reset_measuring(self):
+        """Reset measuring sub-state only — lock flags untouched."""
         self.measuring       = False
         self.measure_start   = 0.0
         self.radius_samples  = []
         self.cx_samples      = []
         self.cy_samples      = []
+
+    def full_reset(self):
+        """Full reset on DONE:cabbage — clears lock and measuring state."""
+        self.capture_done    = False
+        self.must_exit_first = False
+        self._reset_measuring()
 
 
 _capture_state = CaptureState()
@@ -496,6 +501,7 @@ def check_and_capture(frame, circles, center_x, cap_counter, state=None):
 
     now = time.time()
 
+    # ── LOCKED: already captured this session ──
     if state.capture_done:
         return False
 
@@ -509,7 +515,7 @@ def check_and_capture(frame, circles, center_x, cap_counter, state=None):
     if nearest is None:
         if state.measuring:
             print(f"  [ABORT] Object left centerline — discarding {len(state.radius_samples)} samples")
-            state.reset()
+            state._reset_measuring()
         if state.must_exit_first:
             print("  [READY] Object left centerline — ready for next capture")
             state.must_exit_first = False
@@ -588,10 +594,10 @@ def check_and_capture(frame, circles, center_x, cap_counter, state=None):
         cv2.imwrite(filename, annotated)
 
         last_t = now
-        state.reset()
+        state._reset_measuring()
         state.last_capture_t  = last_t
         state.must_exit_first = True
-        state.capture_done    = True
+        state.capture_done    = True   # LOCK until DONE:cabbage
 
         print(f"\n{'='*55}")
         print(f"  [CAPTURE] Cabbage measurement captured!")
@@ -600,7 +606,7 @@ def check_and_capture(frame, circles, center_x, cap_counter, state=None):
         print(f"  Avg radius: {avg_r:.1f}px  std={std_r:.1f}px")
         print(f"  Diameter  : {d_cm:.2f} cm")
         print(f"  Samples   : {len(r_clean)} used / {n_total} total  ({n_filtered} outliers removed)")
-        print(f"  Session locked — no further captures this run.")
+        print(f"  Session LOCKED — send DONE:cabbage to /msg to unlock.")
         print(f"{'='*55}")
 
         if state.publish_callback is not None:
@@ -687,8 +693,11 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.disp_frame = None
             self.frame_lock = threading.Lock()
 
-            # ── Detection gate state [v4.2] ──────────────────────────
-            self.gate_state        = "WAITING"   # "WAITING" | "WARMUP" | "DETECTING"
+            # ── Detection gate state [v4.4] ──────────────────────────
+            # WAITING   → WARMUP  (on startc)
+            # WARMUP    → DETECTING (after PLANTING_WARMUP_SEC)
+            # DETECTING → WAITING (on DONE:cabbage, ready for next startc)
+            self.gate_state        = "WAITING"
             self.planting2_recv_t  = 0.0
             self.last_msg_received = "—"
 
@@ -706,15 +715,16 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 String, '/plant_feedback', self.plant_feedback_callback, 10)
 
             self.get_logger().info("=" * 50)
-            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.3")
+            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.4")
             self.get_logger().info(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
             self.get_logger().info(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  fill >= {CABBAGE_FILL_MIN}")
             self.get_logger().info(f" Detection gate = LOCKED (waiting for startc on /plant_feedback)")
             self.get_logger().info(f" Warmup delay   = {PLANTING_WARMUP_SEC}s after startc")
+            self.get_logger().info(f" PX_PER_CM      = {PX_PER_CM} (calibrated)")
             self.get_logger().info(" Topic : /camera_side/image_raw/compressed")
             self.get_logger().info(" Output: /capture_feedback  (String: SUCCESS)")
             self.get_logger().info(" Log   : /msg  (String: LOG:[d1 d2 ...]  published each capture)")
-            self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
+            self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)  → unlocks capture + gate → WAITING")
             self.get_logger().info(" Unlock: /plant_feedback  (String: startc)")
             self.get_logger().info(" HOG   : OpenCV only (no skimage)")
             self.get_logger().info("=" * 50)
@@ -745,10 +755,11 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 return
             self.last_msg_received = f"/msg: {cmd}"
             if cmd == "DONE:cabbage":
-                self.cam_state.capture_done    = False
-                self.cam_state.must_exit_first = False
-                self.cam_state.reset()
-                self.get_logger().info("[RESET] Received DONE:cabbage — capture state reset")
+                # Full reset: unlock capture AND return gate to WAITING for next startc
+                self.cam_state.full_reset()
+                self.gate_state = "WAITING"
+                self.get_logger().info(
+                    "[RESET] Received DONE:cabbage — capture unlocked, gate → WAITING")
 
         def image_callback(self, msg):
             np_arr = np.frombuffer(msg.data, np.uint8)
@@ -766,7 +777,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             self.frame_count += 1
 
-            # ── Detection gate check [v4.2] ───────────────────────────
+            # ── Detection gate check ───────────────────────────────────
             if self.gate_state == "WARMUP":
                 if now - self.planting2_recv_t >= PLANTING_WARMUP_SEC:
                     self.gate_state = "DETECTING"
@@ -793,6 +804,8 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             is_processed = gate_active and (self.frame_count % PROCESS_EVERY_N_FRAMES == 0)
             if not gate_active:
                 proc_label, proc_color = "GATE-LOCKED", (0, 80, 255)
+            elif self.cam_state.capture_done:
+                proc_label, proc_color = "CAP-LOCKED", (0, 140, 255)
             elif is_processed:
                 proc_label, proc_color = "DETECT", (0, 255, 150)
             else:
@@ -824,7 +837,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 cv2.putText(disp, "Edge", (dw-sw+2, dh-sh+14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-            # ── Status bar [v4.2] ─────────────────────────────────────
+            # ── Status bar ────────────────────────────────────────────
             if self.gate_state == "WAITING":
                 gate_label = "GATE: WAITING for /plant_feedback startc"
                 gate_color = (0, 80, 255)
@@ -832,6 +845,9 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 remaining  = max(0.0, PLANTING_WARMUP_SEC - (now - self.planting2_recv_t))
                 gate_label = f"GATE: WARMUP {remaining:.1f}s"
                 gate_color = (0, 200, 255)
+            elif self.cam_state.capture_done:
+                gate_label = "GATE: DETECTING  |  CAP: LOCKED (wait DONE:cabbage)"
+                gate_color = (0, 140, 255)
             else:
                 gate_label = "GATE: DETECTING"
                 gate_color = (0, 220, 100)
@@ -862,7 +878,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
 
-    WIN_NAME = "Green Circle Detector v4.3 — ROS2"
+    WIN_NAME = "Green Circle Detector v4.4 — ROS2"
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
 
     try:
@@ -897,7 +913,7 @@ def main():
     global CABBAGE_SOLIDITY_MIN, CABBAGE_FILL_MIN, CABBAGE_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v4.3 — ROS2 mode only (OpenCV HOG, no skimage)"
+        description="Green Circle Detector v4.4 — ROS2 mode only (OpenCV HOG, calibrated PX_PER_CM)"
     )
     parser.add_argument("--threshold",    type=float, default=0.50)
     parser.add_argument("--thickness",    type=int,   default=6)

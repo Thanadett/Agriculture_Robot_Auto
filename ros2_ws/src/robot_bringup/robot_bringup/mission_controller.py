@@ -13,6 +13,8 @@ SLOW_1_FRAC  = 0.30
 SLOW_2_DIST  = 0.03    # 3 cm
 SLOW_2_FRAC  = 0.15
 
+FINAL_MOVE_M = 1.0     # ระยะเดินหน้าหลัง FINISH (เมตร)
+
 # ════════════════════════════════════════════════════════════════
 MS_IDLE           = 0
 MS_WAIT_0         = 1
@@ -30,7 +32,9 @@ MS_INTERVAL_1     = 12
 MS_WAIT_4A        = 13
 MS_INTERVAL_2     = 14
 MS_WAIT_4B        = 15
-MS_FINISH         = 16
+MS_FINISH         = 16   # หยุด + publish FINISH แล้วรอ wait_sec
+MS_FINAL_MOVE     = 17   # เดินหน้า 1.0 m
+MS_DONE           = 18   # จบสมบูรณ์
 
 MS_NAME = {
     MS_IDLE:          "IDLE",        MS_WAIT_0:        "WAIT_0",
@@ -42,6 +46,8 @@ MS_NAME = {
     MS_INTERVAL_1:    "INTERVAL_1",  MS_WAIT_4A:       "WAIT_4A",
     MS_INTERVAL_2:    "INTERVAL_2",  MS_WAIT_4B:       "WAIT_4B",
     MS_FINISH:        "FINISH",
+    MS_FINAL_MOVE:    "FINAL_MOVE",
+    MS_DONE:          "DONE",
 }
 
 APRILTAG_STATE_DONE = 4
@@ -187,7 +193,8 @@ class MissionController(Node):
             f" | decel={self._decel_mps2}m/s²"
             f" | ramp={self._ramp_time}s"
             f" | slip_ratio={self._slip_ratio}"
-            f" | spike_filter={self._encoder_spike_cm}cm")
+            f" | spike_filter={self._encoder_spike_cm}cm"
+            f" | final_move={FINAL_MOVE_M}m")
 
     # ── Params ────────────────────────────────────────────────────
     def _declare_params(self):
@@ -646,7 +653,7 @@ class MissionController(Node):
                 self._plant_feedback_ok = False
                 self._go(MS_WAIT_1)
                 self._start_wait()
-                if self._pose_z is not None and self._pose_z > 18:
+                if self._pose_z is not None and self._pose_z > 16.0:
                     self._pub_msg("DONE:planting1A")
                 else:
                     self._pub_msg("DONE:planting1B")
@@ -750,18 +757,40 @@ class MissionController(Node):
             if self._wait_done() and self._capture_feedback_ok:
                 self._capture_feedback_ok = False
                 self._go(MS_FINISH)
+                self._start_wait()   # หยุดรอ wait_sec ก่อนเดินต่อ
             elif self._wait_done():
                 self.get_logger().warn(
                     "[WAIT_4B] waiting for /capture_feedback...",
                     throttle_duration_sec=2.0)
 
         # ── FINISH ───────────────────────────────────────────────
+        # หยุดนิ่ง + publish FINISH + รอ wait_sec แล้วจึงออกตัว
         elif self._ms == MS_FINISH:
-            self._stop()
-            self._pub_msg("FINISH")
-            self.get_logger().info(
-                f"[MISSION] FINISH  odom_total={self._odometry_m:.3f}m")
-            self.timer.cancel()
+            if self._wait_done():
+                self.get_logger().info(
+                    f"[MISSION] FINISH stop complete"
+                    f"  odom_total={self._odometry_m:.3f}m"
+                    f"  → FINAL_MOVE {FINAL_MOVE_M}m")
+                self._go(MS_FINAL_MOVE)
+                self._start_move(FINAL_MOVE_M)
+                self._pub_msg("FINISH")   # publish หลังหยุดนิ่งแล้ว
+
+        # ── FINAL_MOVE ───────────────────────────────────────────
+        # เดินหน้า 1.0 m ด้วย PID เหมือน segment ปกติ
+        elif self._ms == MS_FINAL_MOVE:
+            if self._reached():
+                self._log_stop("FINAL_MOVE")
+                self._stop()
+                self.get_logger().info(
+                    f"[MISSION] DONE  odom_total={self._odometry_m:.3f}m")
+                self._go(MS_DONE)
+                self.timer.cancel()
+            else:
+                self._forward()
+
+        # ── DONE ─────────────────────────────────────────────────
+        elif self._ms == MS_DONE:
+            self._stop()   # safety stop (ไม่ควรถึงจุดนี้หลัง cancel)
 
 
 # ════════════════════════════════════════════════════════════════
