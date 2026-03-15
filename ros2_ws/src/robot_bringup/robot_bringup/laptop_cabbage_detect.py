@@ -119,30 +119,39 @@ def green_canny(bgr_img, green_mask):
 
 
 # ══════════════════════════════════════════════════════════════
-#  C. HOG ARC SCORE  [v4.2 — lazy skimage import]
+#  C. HOG ARC SCORE  [v4.3 — OpenCV only, no skimage]
 # ══════════════════════════════════════════════════════════════
 def arc_hog_score(gray_roi):
-    try:
-        from skimage.feature import hog
-    except ImportError:
-        raise ImportError(
-            "[ERROR] scikit-image not found.\n"
-            "Install with:  pip install scikit-image\n"
-            "or:            pip install scikit-image --break-system-packages"
-        )
     h, w = gray_roi.shape
     if h < 16 or w < 16:
         return 0.0
+
     size = max(h, w)
-    size = size + (size % 2)
+    # ต้องหาร 8 ลงตัวสำหรับ HOGDescriptor และต้องมากกว่า block_size (16)
+    size = max((size // 8) * 8, 16)
+
     resized = cv2.resize(gray_roi, (size, size))
-    fd = hog(resized, orientations=9, pixels_per_cell=(8, 8),
-             cells_per_block=(1, 1), visualize=False, channel_axis=None)
+
+    win_size     = (size, size)
+    block_size   = (16, 16)
+    block_stride = (8, 8)
+    cell_size    = (8, 8)
+    nbins        = 9
+
+    try:
+        hog_desc = cv2.HOGDescriptor(win_size, block_size, block_stride, cell_size, nbins)
+        fd = hog_desc.compute(resized).flatten()
+    except cv2.error:
+        return 0.0
+
+    if fd.sum() == 0:
+        return 0.0
+
     n_cells = (size // 8) ** 2
-    bins = fd[:n_cells * 9].reshape(-1, 9).sum(axis=0)
+    bins = fd[:n_cells * nbins].reshape(-1, nbins).sum(axis=0)
     if bins.sum() == 0:
         return 0.0
-    bins /= bins.sum()
+    bins = bins / bins.sum()
     entropy = -np.sum(bins * np.log(bins + 1e-9))
     return float(entropy / np.log(9.0))
 
@@ -697,7 +706,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 String, '/plant_feedback', self.plant_feedback_callback, 10)
 
             self.get_logger().info("=" * 50)
-            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.2")
+            self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.3")
             self.get_logger().info(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
             self.get_logger().info(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  fill >= {CABBAGE_FILL_MIN}")
             self.get_logger().info(f" Detection gate = LOCKED (waiting for startc on /plant_feedback)")
@@ -707,6 +716,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.get_logger().info(" Log   : /msg  (String: LOG:[d1 d2 ...]  published each capture)")
             self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
             self.get_logger().info(" Unlock: /plant_feedback  (String: startc)")
+            self.get_logger().info(" HOG   : OpenCV only (no skimage)")
             self.get_logger().info("=" * 50)
 
         def _publish_success(self):
@@ -852,7 +862,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
 
-    WIN_NAME = "Green Circle Detector v4.2 — ROS2"
+    WIN_NAME = "Green Circle Detector v4.3 — ROS2"
     cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
 
     try:
@@ -887,7 +897,7 @@ def main():
     global CABBAGE_SOLIDITY_MIN, CABBAGE_FILL_MIN, CABBAGE_FILTER_ENABLED
 
     parser = argparse.ArgumentParser(
-        description="Green Circle Detector v4.2 — ROS2 mode only"
+        description="Green Circle Detector v4.3 — ROS2 mode only (OpenCV HOG, no skimage)"
     )
     parser.add_argument("--threshold",    type=float, default=0.50)
     parser.add_argument("--thickness",    type=int,   default=6)

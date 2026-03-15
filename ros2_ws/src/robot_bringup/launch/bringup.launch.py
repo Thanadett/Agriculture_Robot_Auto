@@ -17,7 +17,7 @@ def generate_launch_description():
         DeclareLaunchArgument('forward_vel',      default_value='0.20'),
         DeclareLaunchArgument('reverse_vel',      default_value='0.20'),
         DeclareLaunchArgument('camera_target_z',  default_value='0.50'),
-        DeclareLaunchArgument('reverse_after_m',  default_value='0.40'),
+        DeclareLaunchArgument('reverse_after_m',  default_value='0.75'),
         DeclareLaunchArgument('wait_sec',         default_value='2.0'),
         DeclareLaunchArgument('wheel_diameter',   default_value='0.127'),
         DeclareLaunchArgument('hdg_kp',           default_value='0.8',
@@ -83,17 +83,17 @@ def generate_launch_description():
         }],
     )
 
-    laptop_cabbage_detect = Node(
-        package='robot_bringup',
-        executable='lc_laptop_cabbage_detect',
-        name='laptop_cabbage_detect',
-        output='screen',
-    )
+    # laptop_cabbage_detect = Node(
+    #     package='robot_bringup',
+    #     executable='lc_laptop_cabbage_detect',
+    #     name='laptop_cabbage_detect',
+    #     output='screen',
+    # )
 
     return LaunchDescription(args + [
         laptop_node,
         heading_pid_node,
         mission_controller,
         debug_x11,
-        laptop_cabbage_detect,
+        # laptop_cabbage_detect,
     ])
