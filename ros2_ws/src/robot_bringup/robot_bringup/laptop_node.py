@@ -51,7 +51,7 @@ Z_STOP    = 0.25
 APPROACH_KP        = 0.80
 APPROACH_KI        = 0.00
 APPROACH_KD        = 0.05
-APPROACH_W_MAX     = 0.80
+APPROACH_W_MAX     = 0.60
 APPROACH_V_BASE    = 0.50
 APPROACH_BEAR_DEAD = math.radians(2.0)
 
