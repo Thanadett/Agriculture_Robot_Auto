@@ -45,8 +45,8 @@ STATE_NAME = {
 # Tuning
 # ════════════════════════════════════════════════════════════════
 Z_ALIGN   = 0.50
-Z_FORWARD = 0.48
-Z_STOP    = 0.25
+Z_FORWARD = 0.47
+Z_STOP    = 0.28
 
 APPROACH_KP        = 0.80
 APPROACH_KI        = 0.00
@@ -260,9 +260,9 @@ class AprilTagServo(Node):
         d('dist_k1',  0.18501418493742436); d('dist_k2', -0.5120456495483582)
         d('dist_p1', -0.00020668256887020428); d('dist_p2', 0.002300581823999996)
         d('dist_k3',  0.3412317425706612)
-        d('target_x_offset', 0.04)
-        d('align_x_thresh', 0.04)
-        d('align_target_yaw_deg', 8.7)
+        d('target_x_offset', 0.026)
+        d('align_x_thresh', 0.03)
+        d('align_target_yaw_deg', 5.2)
 
     def _load_params(self):
         g = self.get_parameter
@@ -294,7 +294,7 @@ class AprilTagServo(Node):
             self.K, self.D, (self.W, self.H), 1, (self.W, self.H))
         self.detector = Detector(
             families="tagStandard52h13",
-            nthreads=2, quad_decimate=1.5, refine_edges=1)
+            nthreads=2, quad_decimate=1.0, refine_edges=True)
 
     def _build_pids(self):
         self.pid_b = PID(APPROACH_KP, APPROACH_KI, APPROACH_KD,
