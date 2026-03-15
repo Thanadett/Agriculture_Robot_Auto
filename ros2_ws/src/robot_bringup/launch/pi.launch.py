@@ -11,8 +11,8 @@ def generate_launch_description():
             'camera_id': '/dev/webcam_Numwo_NWC590',
             'image_width': 640,
             'image_height': 480,
-            'fps': 20,
-            'jpeg_quality': 80,
+            'fps': 15,
+            'jpeg_quality': 60,
             'publish_raw': False,
             'use_x11_debug': False
         }]

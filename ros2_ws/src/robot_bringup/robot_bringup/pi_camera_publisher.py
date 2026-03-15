@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Camera Publisher Node  (single-topic edition)
-─────────────────────────────────────────────────────────────
-Topics published:
-  /camera/image_raw/compressed   ← CLAHE JPEG  (YOLO + AprilTag ใช้ร่วมกัน)
-  /camera/image_raw              ← CLAHE BGR    (optional, publish_raw=True)
-
-การแก้ปัญหาแสงจ้า:
-  1. ปิด Auto-Exposure ผ่าน V4L2  → ลด overexpose ที่ต้นทาง
-  2. CLAHE ใน LAB color space     → เพิ่ม local contrast ก่อน publish
-
-[FIX] ลด frame latency:
-  3. grab() flush buffer ก่อน retrieve() ทุก loop → ได้ frame ล่าสุดเสมอ
-"""
 
 import subprocess
 import rclpy
@@ -76,7 +62,7 @@ class CameraPublisher(Node):
         super().__init__('pi_camera_publisher')
 
         # ── Parameters ──────────────────────────────────────────
-        self.declare_parameter('camera_id',       '/dev/webcam_Numwo_NWC590')
+        self.declare_parameter('camera_id',       '/dev/webcam_EYD_2k')
         self.declare_parameter('image_width',      640)
         self.declare_parameter('image_height',     480)
         self.declare_parameter('fps',              30)
@@ -84,12 +70,10 @@ class CameraPublisher(Node):
         self.declare_parameter('publish_raw',      False)
         self.declare_parameter('use_x11_debug',    False)
         self.declare_parameter('manual_exposure',  True)
-        self.declare_parameter('exposure_value',   1000)
-        self.declare_parameter('clahe_clip_limit', 4.0)
+        self.declare_parameter('exposure_value',   1000)    
+        self.declare_parameter('clahe_clip_limit', 2.0)
         self.declare_parameter('clahe_tile_w',     8)
         self.declare_parameter('clahe_tile_h',     8)
-        # [FIX] จำนวน frame ที่ grab() ทิ้งก่อน retrieve() จริง (1–3)
-        self.declare_parameter('flush_frames',     2)
 
         self.cam_id       = self.get_parameter('camera_id').value
         self.W            = self.get_parameter('image_width').value
@@ -103,7 +87,6 @@ class CameraPublisher(Node):
         clip              = self.get_parameter('clahe_clip_limit').value
         tile_w            = self.get_parameter('clahe_tile_w').value
         tile_h            = self.get_parameter('clahe_tile_h').value
-        self.flush_frames = self.get_parameter('flush_frames').value  # [FIX]
 
         # ── CLAHE ────────────────────────────────────────────────
         self.clahe_proc = CLAHEProcessor(clip_limit=clip, tile_grid=(tile_w, tile_h))
@@ -149,23 +132,14 @@ class CameraPublisher(Node):
             f" | JPEG={self.jpeg_quality}"
             f" | exposure={'manual(' + str(self.exp_value) + ')' if self.manual_exp else 'auto'}"
             f" | CLAHE clip={clip} tile=({tile_w},{tile_h})"
-            f" | flush_frames={self.flush_frames}"  # [FIX]
         )
 
     # ── Main loop ────────────────────────────────────────────────
     def loop(self):
-        # [FIX] flush buffer ทิ้ง frame เก่าที่ค้างอยู่ก่อน retrieve frame จริง
-        # ป้องกัน lag ที่เกิดจาก V4L2 internal buffer สะสม frame เก่า
-        for _ in range(self.flush_frames):
-            self.cap.grab()
-
-        ret, frame = self.cap.retrieve()
+        ret, frame = self.cap.read()
         if not ret:
-            # [FIX] fallback: ถ้า retrieve() ล้มเหลว ลอง read() ปกติ
-            ret, frame = self.cap.read()
-            if not ret:
-                self.get_logger().warn("Camera read failed", throttle_duration_sec=1.0)
-                return
+            self.get_logger().warn("Camera read failed", throttle_duration_sec=1.0)
+            return
 
         self.frame_cnt += 1
         now = self.get_clock().now().to_msg()
@@ -195,7 +169,7 @@ class CameraPublisher(Node):
         if self.use_x11:
             preview = cv2.resize(frame_out, (480, 360))
             cv2.putText(preview,
-                f"frame={self.frame_cnt} exp={self.exp_value} CLAHE flush={self.flush_frames}",
+                f"frame={self.frame_cnt} exp={self.exp_value} CLAHE",
                 (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
             cv2.imshow("Camera (CLAHE)", preview)
             if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q'), 27):
