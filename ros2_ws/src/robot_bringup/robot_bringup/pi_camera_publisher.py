@@ -10,13 +10,7 @@ import cv2
 import numpy as np
 
 
-# ──────────────────────────────────────────────────────────────
-# Helper: ตั้งค่า exposure ผ่าน v4l2-ctl
-# ──────────────────────────────────────────────────────────────
 def set_manual_exposure(device: str, exposure_value: int, logger=None) -> bool:
-    # ชื่อ control ที่กล้องนี้ใช้จริง (จาก v4l2-ctl --list-ctrls):
-    #   auto_exposure=1           → Manual Mode  (default=3 คือ Aperture Priority)
-    #   exposure_time_absolute    → shutter speed (range 2–1250)
     cmds = [
         ["v4l2-ctl", "-d", device, "--set-ctrl=auto_exposure=1"],
         ["v4l2-ctl", "-d", device, f"--set-ctrl=exposure_time_absolute={exposure_value}"],
@@ -39,9 +33,6 @@ def set_manual_exposure(device: str, exposure_value: int, logger=None) -> bool:
     return True
 
 
-# ──────────────────────────────────────────────────────────────
-# CLAHE processor  (LAB color space → แก้แค่ความสว่าง รักษาสี)
-# ──────────────────────────────────────────────────────────────
 class CLAHEProcessor:
     def __init__(self, clip_limit: float = 2.0, tile_grid: tuple = (8, 8)):
         self.clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
@@ -53,15 +44,11 @@ class CLAHEProcessor:
         return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
 
 
-# ──────────────────────────────────────────────────────────────
-# Node
-# ──────────────────────────────────────────────────────────────
 class CameraPublisher(Node):
 
     def __init__(self):
         super().__init__('pi_camera_publisher')
 
-        # ── Parameters ──────────────────────────────────────────
         self.declare_parameter('camera_id',       '/dev/webcam_EYD_2k')
         self.declare_parameter('image_width',      640)
         self.declare_parameter('image_height',     480)
@@ -70,7 +57,7 @@ class CameraPublisher(Node):
         self.declare_parameter('publish_raw',      False)
         self.declare_parameter('use_x11_debug',    False)
         self.declare_parameter('manual_exposure',  True)
-        self.declare_parameter('exposure_value',   1000)    
+        self.declare_parameter('exposure_value',   1000)
         self.declare_parameter('clahe_clip_limit', 2.0)
         self.declare_parameter('clahe_tile_w',     8)
         self.declare_parameter('clahe_tile_h',     8)
@@ -88,10 +75,8 @@ class CameraPublisher(Node):
         tile_w            = self.get_parameter('clahe_tile_w').value
         tile_h            = self.get_parameter('clahe_tile_h').value
 
-        # ── CLAHE ────────────────────────────────────────────────
         self.clahe_proc = CLAHEProcessor(clip_limit=clip, tile_grid=(tile_w, tile_h))
 
-        # ── Publishers ──────────────────────────────────────────
         self.pub_compressed = self.create_publisher(
             CompressedImage, '/camera/image_raw/compressed', 5)
 
@@ -99,32 +84,22 @@ class CameraPublisher(Node):
             self.pub_image = self.create_publisher(
                 Image, '/camera/image_raw', 5)
 
-        # ── Camera ──────────────────────────────────────────────
         self.cap = cv2.VideoCapture(self.cam_id, cv2.CAP_V4L2)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.W)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
         self.cap.set(cv2.CAP_PROP_FPS,          self.fps)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        self.cap.set(cv2.CAP_PROP_AUTO_WB,      0)   # ปิด Auto White Balance → ป้องกันภาพกระพริบ
-
-        # ── Manual Exposure ──────────────────────────────────────
-        if self.manual_exp:
-            ok = set_manual_exposure(self.cam_id, self.exp_value, self.get_logger())
-            if not ok:
-                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-                self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
-                self.get_logger().warn("ใช้ OpenCV CAP_PROP_EXPOSURE fallback")
+        self.cap.set(cv2.CAP_PROP_AUTO_WB,      0)
 
         self.bridge    = CvBridge()
         self.frame_cnt = 0
+        self._exposure_set = False   # ← flag: ยังไม่ได้ set exposure
 
-        # ── X11 debug ────────────────────────────────────────────
         if self.use_x11:
             cv2.namedWindow("Camera (CLAHE)", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Camera (CLAHE)", 480, 360)
 
-        # ── Timer ────────────────────────────────────────────────
         self.timer = self.create_timer(1.0 / self.fps, self.loop)
 
         self.get_logger().info(
@@ -134,8 +109,18 @@ class CameraPublisher(Node):
             f" | CLAHE clip={clip} tile=({tile_w},{tile_h})"
         )
 
-    # ── Main loop ────────────────────────────────────────────────
     def loop(self):
+        # ── Set exposure หลัง OpenCV init กล้องเสร็จ (frame แรกเท่านั้น) ──
+        if not self._exposure_set:
+            if self.manual_exp:
+                ok = set_manual_exposure(self.cam_id, self.exp_value, self.get_logger())
+                if not ok:
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                    self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
+                    self.get_logger().warn("ใช้ OpenCV CAP_PROP_EXPOSURE fallback")
+            self._exposure_set = True
+            return  # skip frame นี้ ให้กล้องปรับค่าก่อน
+
         ret, frame = self.cap.read()
         if not ret:
             self.get_logger().warn("Camera read failed", throttle_duration_sec=1.0)
@@ -144,10 +129,8 @@ class CameraPublisher(Node):
         self.frame_cnt += 1
         now = self.get_clock().now().to_msg()
 
-        # CLAHE ก่อน publish ทุก topic
         frame_out = self.clahe_proc.apply(frame)
 
-        # ── Publish compressed ───────────────────────────────────
         encode_param = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
         ret2, buf = cv2.imencode('.jpg', frame_out, encode_param)
         if ret2:
@@ -158,14 +141,12 @@ class CameraPublisher(Node):
             msg.data            = buf.tobytes()
             self.pub_compressed.publish(msg)
 
-        # ── Publish raw BGR (optional) ───────────────────────────
         if self.pub_raw:
             img_msg = self.bridge.cv2_to_imgmsg(frame_out, encoding='bgr8')
             img_msg.header.stamp    = now
             img_msg.header.frame_id = 'camera'
             self.pub_image.publish(img_msg)
 
-        # ── X11 debug ────────────────────────────────────────────
         if self.use_x11:
             preview = cv2.resize(frame_out, (480, 360))
             cv2.putText(preview,
@@ -175,7 +156,6 @@ class CameraPublisher(Node):
             if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q'), 27):
                 raise KeyboardInterrupt
 
-    # ── Cleanup ──────────────────────────────────────────────────
     def destroy_node(self):
         self.cap.release()
         if self.use_x11:
@@ -183,7 +163,6 @@ class CameraPublisher(Node):
         super().destroy_node()
 
 
-# ──────────────────────────────────────────────────────────────
 def main(args=None):
     rclpy.init(args=args)
     node = CameraPublisher()
