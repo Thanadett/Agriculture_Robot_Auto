@@ -44,23 +44,23 @@ STATE_NAME = {
 # ════════════════════════════════════════════════════════════════
 # Tuning
 # ════════════════════════════════════════════════════════════════
-Z_ALIGN   = 0.50
+Z_ALIGN   = 0.47
 Z_FORWARD = 0.47
-Z_STOP    = 0.28
+Z_STOP    = 0.25
 
 APPROACH_KP        = 0.80
 APPROACH_KI        = 0.00
-APPROACH_KD        = 0.12          # เพิ่มจาก 0.05 → ลด oscillate
+APPROACH_KD        = 0.12
 APPROACH_W_MAX     = 0.60
 APPROACH_V_BASE    = 0.50
 APPROACH_BEAR_DEAD = math.radians(2.0)
 
-ALIGN_KP       = 0.40
+ALIGN_KP       = 0.30
 ALIGN_KI       = 0.00
-ALIGN_KD       = 0.25
+ALIGN_KD       = 0.15
 ALIGN_W_MAX    = 0.22
 ALIGN_V        = 0.10
-ALIGN_YAW_DEAD = math.radians(1.8)
+ALIGN_YAW_DEAD = math.radians(1.2)
 ALIGN_BRAKE_ZONE = math.radians(8.0)
 ALIGN_STABLE_REQUIRED = 6
 ALIGN_YAW_TIMEOUT     = 1.5
@@ -82,12 +82,12 @@ FORWARD_STUCK_SEC   = 2.0
 FORWARD_STUCK_DELTA = 0.01
 
 DETECT_EVERY    = 1
-STABLE_REQUIRED = 2              # ลดจาก 4 → ออก SEARCH เร็วขึ้น
+STABLE_REQUIRED = 2
 LOST_TIMEOUT    = 4.0
 MISS_GRACE      = 5
 
 LOCK_LOST_MAX    = 30
-PRELOCK_REQUIRED = 2             # ลดจาก 3 → lock เร็วขึ้น
+PRELOCK_REQUIRED = 2
 
 YOLO_EVERY      = 3
 YOLO_CONF       = 0.25
@@ -95,12 +95,8 @@ YOLO_MARGIN     = 80
 YOLO_STALE_MAX  = 15
 YOLO_CLASS_NAME = None
 
-# ── Spatial Lock ──────────────────────────────────────────────────────────────
-# ระยะห่าง pixel สูงสุดที่ยอมรับว่า "เป็น tag เดิม" (spatial continuity)
-# ปรับเพิ่มถ้า robot เคลื่อนเร็ว หรือ fps ต่ำ
-SPATIAL_LOCK_PIXEL_THRESH = 120   # px
-# เมื่อ z น้อยกว่านี้ ให้บังคับใช้ spatial lock แทน YOLO ทุกกรณี
-SPATIAL_LOCK_Z_THRESH     = Z_ALIGN + 0.10   # 0.60 m
+SPATIAL_LOCK_PIXEL_THRESH = 120
+SPATIAL_LOCK_Z_THRESH     = Z_ALIGN + 0.10
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -171,47 +167,31 @@ class TagSmoother:
 
     @property
     def z_raw(self):
-        """Median ของ z buffer ล่าสุด — ไม่มี EMA lag เหมาะสำหรับตัดสิน state transition"""
         return float(np.median(self._zb)) if self._zb else None
 
 
 # ════════════════════════════════════════════════════════════════
-# Spatial Lock — ติดตาม tag ด้วย pixel centroid continuity
+# Spatial Lock
 # ════════════════════════════════════════════════════════════════
 class SpatialLock:
-    """
-    เมื่อ YOLO ใช้ไม่ได้ (ระยะใกล้ / tags ID เดียวกันหลายตัว)
-    ติดตาม tag โดยเลือก detection ที่ centroid ใกล้กับตำแหน่งสุดท้ายมากที่สุด
-
-    Logic:
-      - update_from_det() : บันทึก centroid ของ tag ที่เลือก
-      - pick_closest()    : คืน detection ที่ใกล้ centroid ล่าสุดมากที่สุด
-                            ถ้าไกลเกิน pixel_thresh → คืน (None, dist)
-    """
     def __init__(self, pixel_thresh=SPATIAL_LOCK_PIXEL_THRESH):
         self.pixel_thresh = pixel_thresh
-        self.cx = None   # centroid x ล่าสุด (pixel)
-        self.cy = None   # centroid y ล่าสุด (pixel)
+        self.cx = None
+        self.cy = None
         self.active = False
 
     def reset(self):
         self.cx = None; self.cy = None; self.active = False
 
     def update_from_det(self, det):
-        """อัปเดต centroid จาก AprilTag detection object"""
         c = det.corners.astype(float)
         self.cx = float(np.mean(c[:, 0]))
         self.cy = float(np.mean(c[:, 1]))
         self.active = True
 
     def pick_closest(self, dets):
-        """
-        เลือก detection ที่ centroid ใกล้กับ self.cx/cy มากที่สุด
-        คืน (best_det, dist_px) หรือ (None, dist_px) ถ้าไกลเกิน threshold
-        """
         if not self.active or not dets:
             return None, float('inf')
-
         best_det  = None
         best_dist = float('inf')
         for det in dets:
@@ -222,10 +202,8 @@ class SpatialLock:
             if d < best_dist:
                 best_dist = d
                 best_det  = det
-
         if best_dist <= self.pixel_thresh:
             return best_det, best_dist
-        # ไกลเกิน threshold → คืน det ที่ใกล้สุดพร้อม dist (caller ตัดสินใจ)
         return None, best_dist
 
 
@@ -280,10 +258,8 @@ class YOLOGuard:
         if self.disabled: info['reason'] = 'disabled'; return 0.0, info
         if self.bbox is None: info['reason'] = 'no_bbox'; return float('inf'), info
         x1, y1, x2, y2 = self.bbox; m = self.margin
-
         centroid_x = float(np.mean(corners[:, 0]))
         centroid_y = float(np.mean(corners[:, 1]))
-
         if not (x1 - m <= centroid_x <= x2 + m):
             info['reason'] = 'x_out'; return float('inf'), info
         score = abs(centroid_y - y1)
@@ -311,9 +287,7 @@ class AprilTagServo(Node):
             f" | x_offset={self._target_x_offset:.3f}m"
             f" | align_x_thresh={self._align_x_thresh:.3f}m"
             f" | target_yaw={math.degrees(self._align_target_yaw):.1f}°"
-            f" | brake_zone={math.degrees(ALIGN_BRAKE_ZONE):.1f}°"
-            f" | spatial_px_thresh={SPATIAL_LOCK_PIXEL_THRESH}px"
-            f" | spatial_z_thresh={SPATIAL_LOCK_Z_THRESH:.2f}m")
+            f" | Z_ALIGN={Z_ALIGN:.2f}m")
 
     # ── Parameters ───────────────────────────────────────────────
     def _declare_params(self):
@@ -334,9 +308,9 @@ class AprilTagServo(Node):
         d('dist_p1',  0.0018016917089935594)
         d('dist_p2',  0.0076473276069728155)
         d('dist_k3',  0.5044612186719518)
-        d('target_x_offset', 0.026)
-        d('align_x_thresh', 0.03)
-        d('align_target_yaw_deg', 9.3)
+        d('target_x_offset', 0.05)
+        d('align_x_thresh', 0.05)
+        d('align_target_yaw_deg', 0.5)
 
     def _load_params(self):
         g = self.get_parameter
@@ -412,12 +386,10 @@ class AprilTagServo(Node):
         self._align_stable_frames = 0
         self._align_yaw_sign = -1.0
         self._align_yaw_ok_t = None
-        # ── Spatial Lock ─────────────────────────────────────────
         self.spatial = SpatialLock(pixel_thresh=SPATIAL_LOCK_PIXEL_THRESH)
 
     # ── Helpers ──────────────────────────────────────────────────
     def _full_unlock(self, frame=None):
-        """Reset lock + spatial lock ทั้งหมด"""
         self.locked_tag_id    = None
         self.lock_lost_frames = 0
         self.prelock_id       = None
@@ -428,11 +400,6 @@ class AprilTagServo(Node):
             self.yolo.update(frame)
 
     def _should_use_spatial(self):
-        """
-        บังคับใช้ spatial lock แทน YOLO เมื่อ:
-          1. spatial เคย active แล้ว  AND
-          2. ระยะใกล้พอ (z <= SPATIAL_LOCK_Z_THRESH)  OR  state เป็น ALIGN/FORWARD
-        """
         if not self.spatial.active:
             return False
         z_now = self.tag.z_raw
@@ -454,7 +421,6 @@ class AprilTagServo(Node):
         except Exception as e:
             self.get_logger().warn(f"detect: {e}"); return None
 
-        # ── ไม่พบ tag เลย ────────────────────────────────────────
         if not dets:
             if self.locked_tag_id is not None:
                 self.lock_lost_frames += 1
@@ -464,9 +430,6 @@ class AprilTagServo(Node):
                     self._full_unlock(frame)
             return None
 
-        # ════════════════════════════════════════════════════════
-        # กรณี A: มี locked_tag_id แล้ว
-        # ════════════════════════════════════════════════════════
         if self.locked_tag_id is not None:
             same_id = [d for d in dets if d.tag_id == self.locked_tag_id]
             if not same_id:
@@ -480,17 +443,13 @@ class AprilTagServo(Node):
             self.lock_lost_frames = 0
 
             if len(same_id) == 1:
-                # มีแค่ตัวเดียว → เลือกเลย
                 best = same_id[0]
                 self.get_logger().info(
                     "[SPATIAL] single det → direct lock",
                     throttle_duration_sec=1.0)
-
             elif self._should_use_spatial():
-                # ── หลายตัว + ระยะใกล้ → spatial lock ──────────
                 best, dist_px = self.spatial.pick_closest(same_id)
                 if best is None:
-                    # centroid กระโดดเกิน threshold → fallback ตัวใกล้สุด (ไม่ unlock)
                     best = min(same_id,
                                key=lambda d: float(d.pose_t.flatten()[2]))
                     self.get_logger().warn(
@@ -502,25 +461,17 @@ class AprilTagServo(Node):
                         f"[SPATIAL] locked | dist={dist_px:.1f}px"
                         f" | dets={len(same_id)}",
                         throttle_duration_sec=1.0)
-
             else:
-                # ── หลายตัว + ระยะไกล → เลือก z น้อยสุด ────────
                 best = min(same_id, key=lambda d: float(d.pose_t.flatten()[2]))
 
-            # อัปเดต spatial centroid ด้วย detection ที่เลือก
             self.spatial.update_from_det(best)
 
-        # ════════════════════════════════════════════════════════
-        # กรณี B: ยังไม่มี locked_tag_id (pre-lock phase)
-        # ════════════════════════════════════════════════════════
         else:
             if self.target_tag_id >= 0:
                 target = [d for d in dets if d.tag_id == self.target_tag_id]
                 if not target: return None
                 best = min(target, key=lambda d: float(d.pose_t.flatten()[2]))
-
             else:
-                # ── YOLO ช่วยเลือก (ระยะไกล ยังไม่ lock) ────────
                 self._yolo_frame += 1
                 if self._yolo_frame % YOLO_EVERY == 0:
                     self.yolo.update(frame)
@@ -553,7 +504,6 @@ class AprilTagServo(Node):
                     scored.sort(key=lambda t: t[0])
                     best = scored[0][1]
 
-            # ── Pre-lock accumulation ─────────────────────────────
             if self.prelock_id == best.tag_id:
                 self.prelock_count += 1
             else:
@@ -561,11 +511,10 @@ class AprilTagServo(Node):
             if self.prelock_count < PRELOCK_REQUIRED:
                 return None
 
-            # ── Commit lock + เริ่ม spatial lock ─────────────────
             self.locked_tag_id    = best.tag_id
             self.lock_lost_frames = 0
             self.prelock_id = None; self.prelock_count = 0
-            self.spatial.update_from_det(best)   # เริ่ม spatial ทันที
+            self.spatial.update_from_det(best)
 
             tx_lock = float(best.pose_t.flatten()[0]) * (-1.0 if self.invert_x else 1.0)
             if tx_lock > self._align_x_thresh:
@@ -576,10 +525,8 @@ class AprilTagServo(Node):
                 f"[LOCK] ✓ tag_id={self.locked_tag_id}"
                 f"  z={float(best.pose_t.flatten()[2]):.3f}m"
                 f"  tx={tx_lock:.3f}m → {_side}"
-                f"  yaw_sign={self._align_yaw_sign:+.0f}"
-                f"  spatial_cx={self.spatial.cx:.0f}  spatial_cy={self.spatial.cy:.0f}")
+                f"  yaw_sign={self._align_yaw_sign:+.0f}")
 
-        # ── Compute pose (shared path) ────────────────────────────
         tx, _, tz = best.pose_t.flatten()
         x_raw = float(tx) * (-1.0 if self.invert_x else 1.0)
         z_m   = float(tz)
@@ -605,7 +552,7 @@ class AprilTagServo(Node):
         if not force:
             if self.state not in (STATE_SEARCH, STATE_DONE,
                                   STATE_SCAN_BACK, STATE_REVERSE) \
-               and self._sframe < 3:
+               and self._sframe < 2:
                 return
         self.get_logger().info(
             f"[STATE] {STATE_NAME[self.state]} → {STATE_NAME[new_state]}"
@@ -623,11 +570,13 @@ class AprilTagServo(Node):
             self.pid_y.reset()
             self._align_stable_frames = 0
             self._align_yaw_ok_t = None
+            self._stuck_n = 0          # ← reset stuck counter ป้องกัน REVERSE ทันที
+            self._stuck_z = None
+            self._stuck_t = None
             self.get_logger().info(
                 f"[ALIGN] entry  yaw_sign={self._align_yaw_sign:+.0f}"
                 f"  z={self.tag.z:.3f}m  tag_x={self.tag.x:.3f}m"
-                f"  spatial={'ACTIVE' if self.spatial.active else 'OFF'}"
-                f"  cx={self.spatial.cx:.0f if self.spatial.cx else 'N/A'}")
+                f"  spatial={'ACTIVE' if self.spatial.active else 'OFF'}")
 
         if new_state == STATE_SEARCH:
             self.published = False
@@ -660,8 +609,9 @@ class AprilTagServo(Node):
             self._sb_turned = 0.0; self._sb_dir = -self._last_wdir
 
     def _next_nav_state(self, z):
-        # ใช้ z_raw (median ไม่มี EMA lag) ตัดสิน threshold
-        z_dec = self.tag.z_raw if self.tag.z_raw is not None else z
+        z_raw = self.tag.z_raw if self.tag.z_raw is not None else z
+        z_ema = self.tag.z     if self.tag.z     is not None else z
+        z_dec = min(z_raw, z_ema)
 
         if z_dec <= Z_STOP:
             return STATE_DONE
@@ -847,7 +797,7 @@ class AprilTagServo(Node):
             x, z, yaw = self.tag.x, self.tag.z, self.tag.yaw
             bearing   = self.tag.bearing
             next_s    = self._next_nav_state(z)
-            self._go(next_s, force=(next_s == STATE_DONE))
+            self._go(next_s, force=(next_s in (STATE_DONE, STATE_ALIGN)))  # ← force ALIGN ด้วย
             self._control(x, z, yaw, bearing, cmd)
 
         self.cmd_pub.publish(cmd)
@@ -866,8 +816,8 @@ class AprilTagServo(Node):
             float(self._align_stable_frames),
             float(self._align_yaw_sign),
             float(self.tag.x) if self.tag.x is not None else -999.0,
-            float(1.0 if self.spatial.active else 0.0),          # [NEW] spatial lock status
-            float(self.spatial.cx) if self.spatial.cx else -999.0,  # [NEW] spatial cx
+            float(1.0 if self.spatial.active else 0.0),
+            float(self.spatial.cx) if self.spatial.cx else -999.0,
         ]
         self.dbg_pub.publish(dbg)
 

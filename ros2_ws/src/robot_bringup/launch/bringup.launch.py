@@ -17,7 +17,7 @@ def generate_launch_description():
         DeclareLaunchArgument('forward_vel',      default_value='0.20'),
         DeclareLaunchArgument('reverse_vel',      default_value='0.20'),
         DeclareLaunchArgument('camera_target_z',  default_value='0.50'),
-        DeclareLaunchArgument('reverse_after_m',  default_value='0.34'),
+        DeclareLaunchArgument('reverse_after_m',  default_value='0.40'),
         DeclareLaunchArgument('wait_sec',         default_value='2.0'),
         DeclareLaunchArgument('wheel_diameter',   default_value='0.127'),
         DeclareLaunchArgument('hdg_kp',           default_value='0.8',
