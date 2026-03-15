@@ -402,10 +402,10 @@ class AprilTagServo(Node):
 
             tx_lock = float(best.pose_t[0]) * (-1.0 if self.invert_x else 1.0)
             if tx_lock > self._align_x_thresh:
-                self._align_yaw_sign = -1.0
+                self._align_yaw_sign = 1.0
                 _side = "LEFT"
             else:
-                self._align_yaw_sign = 1.0
+                self._align_yaw_sign = -1.0
                 _side = "RIGHT/CENTER"
             self.get_logger().info(
                 f"[LOCK] ✓ tag_id={self.locked_tag_id}"

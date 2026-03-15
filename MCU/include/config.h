@@ -6,23 +6,21 @@ static constexpr float WHEEL_SEP = 0.365f;         // m
 static constexpr float WHEEL_RADIUS = 0.0635f;     // m
 static constexpr float MAX_OMEGA_FOR_FULL = 20.0f; // rad/s -> 100% PWM
 
-static constexpr bool INVERT_LF = false;
-static constexpr bool INVERT_LR = false;
-static constexpr bool INVERT_RF = false;
-static constexpr bool INVERT_RR = false;
+static constexpr bool INVERT_LF = true;
+static constexpr bool INVERT_LR = true;
+static constexpr bool INVERT_RF = true;
+static constexpr bool INVERT_RR = true;
 
 //-------- Motor Driver Pins ----------------
 // inverted:
 #define LF_IN1 33 // LF == RR
-#define LF_IN2 25 
+#define LF_IN2 25
 #define LR_IN1 14 // LR == RF
-#define LR_IN2 12 
-#define RF_IN1 27 
-#define RF_IN2 26 
-#define RR_IN1 32 
-#define RR_IN2 23 
-
-
+#define LR_IN2 12
+#define RF_IN1 27
+#define RF_IN2 26
+#define RR_IN1 32
+#define RR_IN2 23
 
 // ---------------- LEDC PWM ----------------
 static constexpr int PWM_FREQ_HZ = 20000; // 20kHz เงียบ
@@ -58,14 +56,14 @@ static constexpr float IDLE_DECAY = 0.85f;
  *  แนะนำใช้: 13, 16-19, 34-39 (input-only สำหรับ 34-39)
  */
 
- // LF == RR
- // LR == RF
+// LF == RR
+// LR == RF
 // Front Left - ใช้พินเดิม (ปลอดภัย)
-#define ENC_FL_A 16 
+#define ENC_FL_A 16
 #define ENC_FL_B 19 // (input-only, ปลอดภัย)
 
 // Rear Left - ใช้พินเดิม (ปลอดภัย)
-#define ENC_RL_A 13 
+#define ENC_RL_A 13
 #define ENC_RL_B 17
 
 // Front Right - ย้ายจาก GPIO4 → GPIO34/35
@@ -104,7 +102,7 @@ static constexpr float GYRO_SENS_250 = 131.0f;   // LSB/(deg/s)
 #define MICROROS_SERIAL_BUFFER_SIZE 512
 
 //-------------node 2 ctrl pins ------------------//
-//Servo available on: 2,4,5,12-19,21-23,25-27,32-33
+// Servo available on: 2,4,5,12-19,21-23,25-27,32-33
 #define SERVO_PIN_gripper 27
 #define SERVO_PIN_linear 19
 #define SERVO_PIN_plate 17
@@ -114,11 +112,11 @@ static constexpr float GYRO_SENS_250 = 131.0f;   // LSB/(deg/s)
 #define SERVO_MAX_PULSE 2500
 
 #define PIN_STEP 32
-#define PIN_DIR  25
+#define PIN_DIR 25
 #define PIN_ENABLE 26
 #define STEP_DELAY_US 160
 
-const int TRIG_PIN = 12; 
-const int ECHO_PIN = 34; 
+const int TRIG_PIN = 12;
+const int ECHO_PIN = 34;
 
 const int limitSwitchPin = 13;
