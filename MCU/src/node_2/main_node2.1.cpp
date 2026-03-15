@@ -207,20 +207,34 @@ void loop() {
       }
 
       else if (cmd == CMD_PLANT1B) {
+        publish_feedback("moving camera up"); 
+        robot.mv_cam_up_pattern();          
+        waitRobotStop();    
+
         publish_feedback("plantingB");
         robot.startFixPattern();
         waitRobotStop();
+         
         publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_PLANT1A) {
+        publish_feedback("moving camera up"); 
+        robot.mv_cam_up_pattern();          
+        waitRobotStop();    
+
         publish_feedback("plantingA");
         robot.startPlantpattern();
         waitRobotStop();
+
         publish_feedback("SUCCESS");
       }
 
       else if (cmd == CMD_PLANT2) {
+        publish_feedback("moving camera up"); 
+        robot.mv_cam_up_pattern();          
+        waitRobotStop();
+
         publish_feedback("plant loading");
         robot.LoadPattern();
         waitRobotStop();
@@ -228,10 +242,7 @@ void loop() {
         publish_feedback("planting2");
         robot.startPlantpattern();
         waitRobotStop();
-
-        publish_feedback("moving camera up"); 
-        robot.mv_cam_up_pattern();          
-        waitRobotStop();    
+    
 
         publish_feedback("startc");
         waitRobotStop(); 

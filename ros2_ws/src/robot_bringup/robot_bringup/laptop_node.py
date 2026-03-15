@@ -294,7 +294,12 @@ class AprilTagServo(Node):
             self.K, self.D, (self.W, self.H), 1, (self.W, self.H))
         self.detector = Detector(
             families="tagStandard52h13",
-            nthreads=2, quad_decimate=1.0, refine_edges=True)
+            nthreads=2,
+            quad_decimate=1.5,
+            quad_sigma=0.0,
+            refine_edges=True,
+            decode_sharpening=0.25
+        )
 
     def _build_pids(self):
         self.pid_b = PID(APPROACH_KP, APPROACH_KI, APPROACH_KD,
