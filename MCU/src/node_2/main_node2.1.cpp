@@ -233,7 +233,11 @@ void loop() {
         robot.mv_cam_up_pattern();          
         waitRobotStop();    
 
-        publish_feedback("startc"); 
+        publish_feedback("startc");
+        waitRobotStop(); 
+        
+        publish_feedback("startc");
+        waitRobotStop(); 
 
         publish_feedback("SUCCESS");
       }
