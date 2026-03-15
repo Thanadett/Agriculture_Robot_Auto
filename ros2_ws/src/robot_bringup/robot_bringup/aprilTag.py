@@ -16,11 +16,26 @@ class AprilTagCamera(Node):
         super().__init__('apriltag_camera_debug')
 
         # ---------------- Camera calibration ----------------
-        self.fx = 651.50492
-        self.fy = 650.39078
-        self.cx = 320.62708
-        self.cy = 236.91812
-        self.tag_size = 0.04
+        self.camera_matrix = np.array([
+            [540.4400079885085, 0.0, 325.0808607335354],
+            [0.0, 540.7148131527974, 243.36767135558003],
+            [0.0, 0.0, 1.0]
+        ])
+
+        self.dist_coeff = np.array([
+            0.18501418493742436,
+            -0.5120456495483582,
+            -0.00020668256887020428,
+            0.002300581823999996,
+            0.3412317425706612
+        ])
+
+        self.fx = 540.4400079885085
+        self.fy = 540.7148131527974
+        self.cx = 325.0808607335354
+        self.cy = 243.36767135558003
+
+        self.tag_size = 0.042
 
         # ---------------- AprilTag Detector ----------------
         self.detector = Detector(
@@ -49,6 +64,9 @@ class AprilTagCamera(Node):
 
         if frame is None:
             return
+
+        # ---------------- Undistort image ----------------
+        frame = cv2.undistort(frame, self.camera_matrix, self.dist_coeff)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
