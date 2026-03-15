@@ -73,7 +73,7 @@ class CameraPublisher(Node):
         super().__init__('pi_camera_publisher')
 
         # ── Parameters ──────────────────────────────────────────
-        self.declare_parameter('camera_id',       '/dev/webcam_EYD_2k')
+        self.declare_parameter('camera_id',       '/dev/webcam_Numwo_NWC590')
         self.declare_parameter('image_width',      640)
         self.declare_parameter('image_height',     480)
         self.declare_parameter('fps',              30)
