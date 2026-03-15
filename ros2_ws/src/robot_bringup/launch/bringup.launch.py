@@ -88,7 +88,6 @@ def generate_launch_description():
         executable='lc_laptop_cabbage_detect',
         name='laptop_cabbage_detect',
         output='screen',
-        arguments=['--ros2']
     )
 
     return LaunchDescription(args + [
