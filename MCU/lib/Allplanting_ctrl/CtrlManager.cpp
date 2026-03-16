@@ -586,7 +586,7 @@ void PlantingManager::update() {
         case MOVECAM_DOWN: 
             switch (_currentStep) {
                 case 1: // 
-                    servo_cam.write(140);
+                    servo_cam.write(133);
                     if (elapsed_pattern >= 1500) { _currentStep++; _previous_Millis = currentMillis; }
                     break;
                 case 2:
@@ -598,7 +598,7 @@ void PlantingManager::update() {
         case RESET:
             switch (_currentStep) {
                 case 1: // 
-                    servo_cam.write(140);
+                    servo_cam.write(133);
                     servo_gripper.write(160);
                     servo_linear.write(moveToAngle(0, 270));
                     _servo_plate_CurrentAngle = HomeAngle; //32.73
