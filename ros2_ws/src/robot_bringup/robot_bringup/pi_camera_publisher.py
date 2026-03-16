@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""
+Camera Publisher Node  (single-topic edition)
+─────────────────────────────────────────────────────────────
+Topics published:
+  /camera/image_raw/compressed   ← CLAHE JPEG  (YOLO + AprilTag ใช้ร่วมกัน)
+  /camera/image_raw              ← CLAHE BGR    (optional, publish_raw=True)
+
+การแก้ปัญหาแสงจ้า + focus:
+  1. ปิด Auto-Exposure ผ่าน V4L2      → ลด overexpose ที่ต้นทาง
+  2. ปิด Auto White Balance            → ป้องกันภาพกระพริบ
+  3. ปิด Autofocus + ล็อค focus_absolute → ภาพคมชัด ไม่ blur ระหว่างอ่าน AprilTag
+  4. CLAHE ใน LAB color space         → เพิ่ม local contrast ก่อน publish
+"""
 
 import subprocess
 import rclpy
@@ -11,15 +24,28 @@ import numpy as np
 
 
 # ──────────────────────────────────────────────────────────────
-# Helper: ตั้งค่า exposure ผ่าน v4l2-ctl
+# Helper: ตั้งค่า exposure + focus ผ่าน v4l2-ctl
 # ──────────────────────────────────────────────────────────────
-def set_manual_exposure(device: str, exposure_value: int, logger=None) -> bool:
-    # ชื่อ control ที่กล้องนี้ใช้จริง (จาก v4l2-ctl --list-ctrls):
-    #   auto_exposure=1           → Manual Mode  (default=3 คือ Aperture Priority)
-    #   exposure_time_absolute    → shutter speed (range 2–1250)
+def set_camera_controls(device: str, exposure_value: int,
+                        focus_value: int, logger=None) -> bool:
+    """
+    ลำดับสำคัญมาก:
+      1. ปิด auto_exposure ก่อน → ถึงจะตั้ง exposure_time_absolute ได้
+      2. ปิด focus_automatic_continuous ก่อน → ถึงจะตั้ง focus_absolute ได้
+         (ถ้า autofocus เปิดอยู่ focus_absolute จะเป็น inactive)
+
+    focus_absolute range: 0–1023
+      ~50–150  = ระยะไกล  (> 1 m)
+      ~200–400 = ระยะกลาง (0.3–1 m)  ← AprilTag ส่วนใหญ่
+      ~500+    = ระยะใกล้  (< 0.3 m)
+    """
     cmds = [
+        # ── Exposure ──────────────────────────────────────────
         ["v4l2-ctl", "-d", device, "--set-ctrl=auto_exposure=1"],
         ["v4l2-ctl", "-d", device, f"--set-ctrl=exposure_time_absolute={exposure_value}"],
+        # ── Focus ─────────────────────────────────────────────
+        ["v4l2-ctl", "-d", device, "--set-ctrl=focus_automatic_continuous=0"],
+        ["v4l2-ctl", "-d", device, f"--set-ctrl=focus_absolute={focus_value}"],
     ]
     for cmd in cmds:
         try:
@@ -35,7 +61,10 @@ def set_manual_exposure(device: str, exposure_value: int, logger=None) -> bool:
                 logger.warn("v4l2-ctl timeout")
             return False
     if logger:
-        logger.info(f"Manual exposure set: exposure_time_absolute={exposure_value}")
+        logger.info(
+            f"Camera controls set: "
+            f"exposure_time_absolute={exposure_value}, "
+            f"focus_absolute={focus_value} (autofocus=OFF)")
     return True
 
 
@@ -62,7 +91,7 @@ class CameraPublisher(Node):
         super().__init__('pi_camera_publisher')
 
         # ── Parameters ──────────────────────────────────────────
-        self.declare_parameter('camera_id',       '/dev/webcam_EYD_2k')
+        self.declare_parameter('camera_id',       '/dev/webcam_Numwo_NWC590')
         self.declare_parameter('image_width',      640)
         self.declare_parameter('image_height',     480)
         self.declare_parameter('fps',              30)
@@ -70,7 +99,8 @@ class CameraPublisher(Node):
         self.declare_parameter('publish_raw',      False)
         self.declare_parameter('use_x11_debug',    False)
         self.declare_parameter('manual_exposure',  True)
-        self.declare_parameter('exposure_value',   1000)    
+        self.declare_parameter('exposure_value',   300)    # range 3–2047 (กล้องนี้)
+        self.declare_parameter('focus_value',      250)    # range 0–1023 (ระยะกลาง ~0.5m)
         self.declare_parameter('clahe_clip_limit', 2.0)
         self.declare_parameter('clahe_tile_w',     8)
         self.declare_parameter('clahe_tile_h',     8)
@@ -84,6 +114,7 @@ class CameraPublisher(Node):
         self.use_x11      = self.get_parameter('use_x11_debug').value
         self.manual_exp   = self.get_parameter('manual_exposure').value
         self.exp_value    = self.get_parameter('exposure_value').value
+        self.focus_value  = self.get_parameter('focus_value').value
         clip              = self.get_parameter('clahe_clip_limit').value
         tile_w            = self.get_parameter('clahe_tile_w').value
         tile_h            = self.get_parameter('clahe_tile_h').value
@@ -106,11 +137,13 @@ class CameraPublisher(Node):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.H)
         self.cap.set(cv2.CAP_PROP_FPS,          self.fps)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-        self.cap.set(cv2.CAP_PROP_AUTO_WB,      0)   # ปิด Auto White Balance → ป้องกันภาพกระพริบ
+        self.cap.set(cv2.CAP_PROP_AUTO_WB,      0)   # ปิด Auto White Balance
 
-        # ── Manual Exposure ──────────────────────────────────────
+        # ── Manual Exposure + Focus ──────────────────────────────
         if self.manual_exp:
-            ok = set_manual_exposure(self.cam_id, self.exp_value, self.get_logger())
+            ok = set_camera_controls(
+                self.cam_id, self.exp_value, self.focus_value,
+                self.get_logger())
             if not ok:
                 self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
                 self.cap.set(cv2.CAP_PROP_EXPOSURE, -6)
@@ -131,6 +164,7 @@ class CameraPublisher(Node):
             f"Camera Publisher ready | {self.W}x{self.H} @ {self.fps}fps"
             f" | JPEG={self.jpeg_quality}"
             f" | exposure={'manual(' + str(self.exp_value) + ')' if self.manual_exp else 'auto'}"
+            f" | focus={self.focus_value} (autofocus=OFF)"
             f" | CLAHE clip={clip} tile=({tile_w},{tile_h})"
         )
 
@@ -144,7 +178,7 @@ class CameraPublisher(Node):
         self.frame_cnt += 1
         now = self.get_clock().now().to_msg()
 
-        # CLAHE ก่อน publish ทุก topic
+        # CLAHE ก่อน publish
         frame_out = self.clahe_proc.apply(frame)
 
         # ── Publish compressed ───────────────────────────────────
@@ -169,7 +203,7 @@ class CameraPublisher(Node):
         if self.use_x11:
             preview = cv2.resize(frame_out, (480, 360))
             cv2.putText(preview,
-                f"frame={self.frame_cnt} exp={self.exp_value} CLAHE",
+                f"frame={self.frame_cnt} exp={self.exp_value} focus={self.focus_value}",
                 (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
             cv2.imshow("Camera (CLAHE)", preview)
             if cv2.waitKey(1) & 0xFF in (ord('q'), ord('Q'), 27):
