@@ -47,6 +47,7 @@ PROCESS_EVERY_N_FRAMES = 4
 #  DETECTION GATE PARAMETERS  [v4.4]
 # ══════════════════════════════════════════════════════════════
 PLANTING_WARMUP_SEC = 5.0   # seconds to wait after startc before detecting
+FALLBACK_WARMUP_SEC = 10.0  # seconds to wait after DONE:cabbage fallback (no startc)
 
 # ══════════════════════════════════════════════════════════════
 #  CABBAGE VALIDATION PARAMETERS  [v4.1]
@@ -694,12 +695,15 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.frame_lock = threading.Lock()
 
             # ── Detection gate state [v4.4] ──────────────────────────
-            # WAITING   → WARMUP  (on startc)
-            # WARMUP    → DETECTING (after PLANTING_WARMUP_SEC)
-            # DETECTING → WAITING (on DONE:cabbage, ready for next startc)
+            # WAITING   → WARMUP  (on startc  OR  DONE:cabbage fallback)
+            # WARMUP    → DETECTING (after warmup_sec elapsed)
+            # DETECTING → WAITING (on DONE:cabbage after capture, ready for next startc)
             self.gate_state        = "WAITING"
             self.planting2_recv_t  = 0.0
+            self.warmup_sec        = PLANTING_WARMUP_SEC  # active warmup duration
             self.last_msg_received = "—"
+            # Track whether startc was received for this session
+            self._startc_received  = False
 
             self.sub = self.create_subscription(
                 CompressedImage,
@@ -714,20 +718,23 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.plant_feedback_sub = self.create_subscription(
                 String, '/plant_feedback', self.plant_feedback_callback, 10)
 
-            self.get_logger().info("=" * 50)
+            self.get_logger().info("=" * 55)
             self.get_logger().info(" Circle Detector Node — ROS2 Mode v4.4")
             self.get_logger().info(f" Cabbage filter = {'ON' if CABBAGE_FILTER_ENABLED else 'OFF'}")
             self.get_logger().info(f"   solidity >= {CABBAGE_SOLIDITY_MIN}  fill >= {CABBAGE_FILL_MIN}")
             self.get_logger().info(f" Detection gate = LOCKED (waiting for startc on /plant_feedback)")
-            self.get_logger().info(f" Warmup delay   = {PLANTING_WARMUP_SEC}s after startc")
+            self.get_logger().info(f"                  OR DONE:cabbage on /msg as fallback")
+            self.get_logger().info(f" Warmup delay   = {PLANTING_WARMUP_SEC}s after trigger")
             self.get_logger().info(f" PX_PER_CM      = {PX_PER_CM} (calibrated)")
             self.get_logger().info(" Topic : /camera_side/image_raw/compressed")
             self.get_logger().info(" Output: /capture_feedback  (String: SUCCESS)")
             self.get_logger().info(" Log   : /msg  (String: LOG:[d1 d2 ...]  published each capture)")
-            self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)  → unlocks capture + gate → WAITING")
+            self.get_logger().info(" Reset : /msg  (String: DONE:cabbage)")
+            self.get_logger().info("          → if after capture: unlock + gate → WAITING")
+            self.get_logger().info("          → if startc not received: fallback warmup → DETECTING")
             self.get_logger().info(" Unlock: /plant_feedback  (String: startc)")
             self.get_logger().info(" HOG   : OpenCV only (no skimage)")
-            self.get_logger().info("=" * 50)
+            self.get_logger().info("=" * 55)
 
         def _publish_success(self):
             from std_msgs.msg import String
@@ -741,8 +748,10 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
             self.last_msg_received = f"/plant_feedback: {cmd}"
             if cmd == "startc":
                 if self.gate_state == "WAITING":
-                    self.gate_state       = "WARMUP"
-                    self.planting2_recv_t = time.time()
+                    self.gate_state        = "WARMUP"
+                    self.planting2_recv_t  = time.time()
+                    self.warmup_sec        = PLANTING_WARMUP_SEC
+                    self._startc_received  = True
                     self.get_logger().info(
                         f"[GATE] Received startc — warmup {PLANTING_WARMUP_SEC}s starts now")
                 else:
@@ -755,11 +764,38 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
                 return
             self.last_msg_received = f"/msg: {cmd}"
             if cmd == "DONE:cabbage":
-                # Full reset: unlock capture AND return gate to WAITING for next startc
-                self.cam_state.full_reset()
-                self.gate_state = "WAITING"
-                self.get_logger().info(
-                    "[RESET] Received DONE:cabbage — capture unlocked, gate → WAITING")
+                was_detecting = self.gate_state in ("DETECTING", "WARMUP")
+
+                if was_detecting:
+                    # Normal post-capture reset — go back to WAITING for next startc
+                    # Guard: only reset if capture actually happened (avoid duplicate spam)
+                    if self.gate_state == "WARMUP" and not self.cam_state.capture_done:
+                        # Still warming up, no capture yet — ignore duplicate
+                        self.get_logger().warn(
+                            "[RESET] DONE:cabbage ignored — warmup in progress, no capture yet")
+                        return
+                    self.cam_state.full_reset()
+                    self.gate_state       = "WAITING"
+                    self._startc_received = False
+                    self.get_logger().info(
+                        "[RESET] Received DONE:cabbage — capture unlocked, gate → WAITING")
+                else:
+                    # gate is WAITING (startc never arrived) — use DONE:cabbage as fallback
+                    # Guard: if already in WARMUP from a previous fallback, ignore duplicates
+                    if self.gate_state == "WARMUP":
+                        remaining = max(0.0, self.warmup_sec - (time.time() - self.planting2_recv_t))
+                        self.get_logger().warn(
+                            f"[GATE] DONE:cabbage ignored — fallback warmup already running "
+                            f"({remaining:.1f}s left)")
+                        return
+                    self.cam_state.full_reset()
+                    self.gate_state        = "WARMUP"
+                    self.planting2_recv_t  = time.time()
+                    self.warmup_sec        = FALLBACK_WARMUP_SEC
+                    self._startc_received  = False
+                    self.get_logger().info(
+                        f"[GATE] DONE:cabbage fallback — startc not received, "
+                        f"warmup {FALLBACK_WARMUP_SEC}s starts now")
 
         def image_callback(self, msg):
             np_arr = np.frombuffer(msg.data, np.uint8)
@@ -779,7 +815,7 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             # ── Detection gate check ───────────────────────────────────
             if self.gate_state == "WARMUP":
-                if now - self.planting2_recv_t >= PLANTING_WARMUP_SEC:
+                if now - self.planting2_recv_t >= self.warmup_sec:
                     self.gate_state = "DETECTING"
                     self.get_logger().info("[GATE] Warmup complete — detection ACTIVE")
 
@@ -839,11 +875,12 @@ def run_ros2(hog_thresh=0.50, edge_thickness=6,
 
             # ── Status bar ────────────────────────────────────────────
             if self.gate_state == "WAITING":
-                gate_label = "GATE: WAITING for /plant_feedback startc"
+                gate_label = "GATE: WAITING (startc or DONE:cabbage)"
                 gate_color = (0, 80, 255)
             elif self.gate_state == "WARMUP":
-                remaining  = max(0.0, PLANTING_WARMUP_SEC - (now - self.planting2_recv_t))
-                gate_label = f"GATE: WARMUP {remaining:.1f}s"
+                remaining  = max(0.0, self.warmup_sec - (now - self.planting2_recv_t))
+                src_label  = "startc" if self._startc_received else "DONE:cabbage fallback"
+                gate_label = f"GATE: WARMUP [{src_label}] {remaining:.1f}s"
                 gate_color = (0, 200, 255)
             elif self.cam_state.capture_done:
                 gate_label = "GATE: DETECTING  |  CAP: LOCKED (wait DONE:cabbage)"
